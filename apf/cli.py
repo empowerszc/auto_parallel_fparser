@@ -30,13 +30,16 @@ def analyze_file(path: str, no_trivial: bool = False) -> str:
     tree = parse_file(path, ignore_comments=False)
     loops = extract_loop_ir(tree)
     report_lines: List[str] = []
+    from .transform import find_loop_range, find_loop_range_nth
+    seen = {}
     for idx, loop in enumerate(loops):
         ar = analyze_loop(loop)
-        from .transform import find_loop_range
         try:
             with open(path, "r") as f:
                 lines = f.readlines()
-            sidx, eidx = find_loop_range(lines, loop.start_text, loop.end_text)
+            key = loop.start_text
+            seen[key] = seen.get(key, 0) + 1
+            sidx, eidx = find_loop_range_nth(lines, loop.start_text, loop.end_text, seen[key])
         except Exception:
             sidx, eidx = (None, None)
         loc = f"{path}:{(sidx+1) if sidx is not None else '?'}"
