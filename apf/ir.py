@@ -7,6 +7,7 @@ class ArrayAccess:
     name: str
     subscripts: List[str]
     affine_map: Dict[str, Tuple[int, int]]
+    nonconst_coeffs: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

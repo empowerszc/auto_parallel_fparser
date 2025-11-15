@@ -23,6 +23,14 @@ def is_affine_term(expr: str, var: str):
     return None
 
 
+def is_variable_coeff_term(expr: str, var: str):
+    m = re.fullmatch(rf"([A-Za-z_]\w*)\s*\*\s*{var}\s*([+-]\s*\d+)?", expr.strip(), re.IGNORECASE)
+    if m:
+        coef_var = m.group(1)
+        return coef_var
+    return None
+
+
 def parse_subscripts_text(section_text: str) -> list:
     inner = section_text.strip()
     if inner.startswith("(") and inner.endswith(")"):

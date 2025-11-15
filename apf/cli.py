@@ -60,8 +60,10 @@ def transform_file(path: str, output: str, style: str = "parallel_do", schedule:
             if skip:
                 continue
             transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth)
-            if col and sidx is not None and eidx is not None:
-                protected.append((sidx, eidx))
+            # 变换后根据AST文本重新定位保护区间，避免 collapse 外层后内层重复并行
+            nsidx, neidx = find_loop_range(transformed, loop.start_text, loop.end_text)
+            if col and nsidx is not None and neidx is not None:
+                protected.append((nsidx, neidx))
             applied += 1
     with open(output, "w") as f:
         f.writelines(transformed)

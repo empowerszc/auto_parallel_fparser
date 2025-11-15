@@ -4,7 +4,7 @@ from fparser.two.utils import walk
 from fparser.two.Fortran2003 import Assignment_Stmt, Part_Ref, Name, Section_Subscript_List, Call_Stmt, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt
 
 from .ir import ArrayAccess, StatementIR, LoopIR, Dependence, AnalysisResult
-from .utils import is_affine_term, parse_subscripts_text
+from .utils import is_affine_term, parse_subscripts_text, is_variable_coeff_term
 from .functions import find_pure_functions
 from .symbols import collect_intent_in
 
@@ -89,6 +89,11 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                 at = is_affine_term(sub, lv)
                                 if at:
                                     affine_map[lv] = at
+                                else:
+                                    vc = is_variable_coeff_term(sub, lv)
+                                    if vc:
+                                        ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
+                                        break
                     ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
                 # RHS reads (array parts only)
                 for ref in walk(s.items[2], Part_Ref):
@@ -103,6 +108,11 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                 at = is_affine_term(sub, lv)
                                 if at:
                                     affine_map[lv] = at
+                                else:
+                                    vc = is_variable_coeff_term(sub, lv)
+                                    if vc:
+                                        ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
+                                        break
                     ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
                 # simple reductions: scalar x = x op expr
                 if isinstance(lhs, Name):
@@ -133,7 +143,7 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                         carried_by = []
                         unknown = False
                         for lv in loop.loop_vars:
-                            if lv in w.affine_map and lv in r.affine_map:
+                            if (lv in w.affine_map and lv in r.affine_map):
                                 cw, kw = w.affine_map[lv]
                                 cr, kr = r.affine_map[lv]
                                 if cw == cr:
@@ -159,6 +169,10 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                                         unknown = True
                                         dist_vec.append(0)
                                         dir_vec.append("?")
+                            elif (lv in getattr(w, 'nonconst_coeffs', {}) or lv in getattr(r, 'nonconst_coeffs', {})):
+                                unknown = True
+                                dist_vec.append(0)
+                                dir_vec.append("?")
                             else:
                                 dist_vec.append(0)
                                 dir_vec.append("=")
