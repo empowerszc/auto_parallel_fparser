@@ -35,7 +35,7 @@ class Dependence:
     src_stmt: int
     dst_stmt: int
     array: str
-    distance_vector: List[int]
+    distance_vector: List
     direction_vector: List[str]
     carried_by: List[str]
 

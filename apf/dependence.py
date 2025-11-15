@@ -176,11 +176,11 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                                         carried_by.append(lv)
                                     else:
                                         unknown_lvs.append(lv)
-                                        dist_vec.append(0)
+                                        dist_vec.append("?")
                                         dir_vec.append("?")
                             elif (lv in getattr(w, 'nonconst_coeffs', {}) or lv in getattr(r, 'nonconst_coeffs', {})):
                                 unknown_lvs.append(lv)
-                                dist_vec.append(0)
+                                dist_vec.append("?")
                                 dir_vec.append("?")
                             else:
                                 dist_vec.append(0)
