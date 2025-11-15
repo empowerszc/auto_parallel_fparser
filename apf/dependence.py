@@ -6,7 +6,7 @@ from fparser.two.Fortran2003 import Assignment_Stmt, Part_Ref, Name, Section_Sub
 from .ir import ArrayAccess, StatementIR, LoopIR, Dependence, AnalysisResult
 from .utils import is_affine_term, parse_subscripts_text, is_variable_coeff_term
 from .functions import find_pure_functions
-from .symbols import collect_intent_in, collect_intent_out, collect_intent_inout, collect_value_attr
+from .symbols import collect_intent_in, collect_intent_out, collect_intent_inout, collect_value_attr, collect_scalar_constants_before
 
 
 def extract_loop_ir(parse_tree) -> List[LoopIR]:
@@ -74,6 +74,11 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
         nest_depth = len(loop_vars) if loop_vars else 1
         # Collect statements in body (include nested assignments within inner loops)
         stmt_irs: List[StatementIR] = []
+        consts = {}
+        try:
+            consts = collect_scalar_constants_before(d)
+        except Exception:
+            consts = {}
         for s in walk(d, Assignment_Stmt):
             text = str(s)
             ir = StatementIR(raw=text)
@@ -89,20 +94,22 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                     subscripts = parse_subscripts_text(str(subsec[0]))
                     for sub in subscripts:
                         for lv in loop_vars:
-                            at = is_affine_term(sub, lv)
+                            from .utils import apply_constants
+                            subx = apply_constants(sub, consts)
+                            at = is_affine_term(subx, lv)
                             if at:
                                 affine_map[lv] = at
                             else:
-                                vc = is_variable_coeff_term(sub, lv)
+                                vc = is_variable_coeff_term(subx, lv)
                                 if vc:
                                     nonconst[lv] = vc
                                 else:
                                     from .utils import has_multiplicative_var
-                                    if has_multiplicative_var(sub, lv):
+                                    if has_multiplicative_var(subx, lv):
                                         nonconst[lv] = sub
                                     else:
                                         from .utils import is_symbolic_offset_term
-                                        sym = is_symbolic_offset_term(sub, lv)
+                                        sym = is_symbolic_offset_term(subx, lv)
                                         if sym:
                                             nonconst[lv] = sub
                 ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
@@ -117,20 +124,22 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                     subscripts = parse_subscripts_text(str(subsec[0]))
                     for sub in subscripts:
                         for lv in loop_vars:
-                            at = is_affine_term(sub, lv)
+                            from .utils import apply_constants
+                            subx = apply_constants(sub, consts)
+                            at = is_affine_term(subx, lv)
                             if at:
                                 affine_map[lv] = at
                             else:
-                                vc = is_variable_coeff_term(sub, lv)
+                                vc = is_variable_coeff_term(subx, lv)
                                 if vc:
                                     nonconst[lv] = vc
                                 else:
                                     from .utils import has_multiplicative_var
-                                    if has_multiplicative_var(sub, lv):
+                                    if has_multiplicative_var(subx, lv):
                                         nonconst[lv] = sub
                                     else:
                                         from .utils import is_symbolic_offset_term
-                                        sym = is_symbolic_offset_term(sub, lv)
+                                        sym = is_symbolic_offset_term(subx, lv)
                                         if sym:
                                             nonconst[lv] = sub
                 ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
@@ -151,6 +160,7 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
 
 def compute_dependences(loop: LoopIR) -> List[Dependence]:
     deps: List[Dependence] = []
+    seen_trivial_shapes = set()
     for i, s1 in enumerate(loop.body_statements):
         for j, s2 in enumerate(loop.body_statements):
             # 允许同一语句内的读写对参与跨迭代依赖判断（例如 A(i) = A(i+1)）
@@ -200,7 +210,14 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                                 dir_vec.append("=")
                         if unknown_lvs:
                             carried_by = list(set(carried_by + unknown_lvs))
-                        deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+                        is_trivial = all((d == 0 for d in dist_vec if not isinstance(d, str))) and all((dr == "=" for dr in dir_vec))
+                        key = (w.name, tuple(dist_vec), tuple(dir_vec))
+                        if is_trivial and key in seen_trivial_shapes:
+                            pass
+                        else:
+                            if is_trivial:
+                                seen_trivial_shapes.add(key)
+                            deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
             # 反依赖：读-写
             for r in s1.reads:
                 for w in s2.writes:
@@ -247,7 +264,14 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                             dir_vec.append("=")
                     if unknown_lvs:
                         carried_by = list(set(carried_by + unknown_lvs))
-                    deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+                    is_trivial = all((d == 0 for d in dist_vec if not isinstance(d, str))) and all((dr == "=" for dr in dir_vec))
+                    key = (w.name, tuple(dist_vec), tuple(dir_vec))
+                    if is_trivial and key in seen_trivial_shapes:
+                        pass
+                    else:
+                        if is_trivial:
+                            seen_trivial_shapes.add(key)
+                        deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
             # 输出依赖：写-写
             for w1 in s1.writes:
                 for w2 in s2.writes:
@@ -294,7 +318,14 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                             dir_vec.append("=")
                     if unknown_lvs:
                         carried_by = list(set(carried_by + unknown_lvs))
-                    deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w1.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+                    is_trivial = all((d == 0 for d in dist_vec if not isinstance(d, str))) and all((dr == "=" for dr in dir_vec))
+                    key = (w1.name, tuple(dist_vec), tuple(dir_vec))
+                    if is_trivial and key in seen_trivial_shapes:
+                        pass
+                    else:
+                        if is_trivial:
+                            seen_trivial_shapes.add(key)
+                        deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w1.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
     return deps
 
 

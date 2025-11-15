@@ -54,6 +54,16 @@ def is_symbolic_offset_term(expr: str, var: str):
     return None
 
 
+def apply_constants(expr: str, consts: dict) -> str:
+    s = expr
+    try:
+        for k, v in consts.items():
+            s = re.sub(rf"\b{re.escape(k)}\b", str(v), s)
+    except Exception:
+        return expr
+    return s
+
+
 def parse_subscripts_text(section_text: str) -> list:
     inner = section_text.strip()
     if inner.startswith("(") and inner.endswith(")"):
