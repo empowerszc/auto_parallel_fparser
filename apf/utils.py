@@ -64,6 +64,11 @@ def apply_constants(expr: str, consts: dict) -> str:
     return s
 
 
+def is_function_like(expr: str) -> bool:
+    s = expr.strip()
+    return bool(re.match(r"^[A-Za-z_]\w*\s*\(.*\)$", s))
+
+
 def parse_subscripts_text(section_text: str) -> list:
     inner = section_text.strip()
     if inner.startswith("(") and inner.endswith(")"):

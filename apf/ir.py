@@ -8,6 +8,8 @@ class ArrayAccess:
     subscripts: List[str]
     affine_map: Dict[str, Tuple[int, int]]
     nonconst_coeffs: Dict[str, str] = field(default_factory=dict)
+    resolved_subscripts: List[str] = field(default_factory=list)
+    complex_index: bool = False
 
 
 @dataclass
@@ -28,6 +30,7 @@ class LoopIR:
     end_text: str
     nest_depth: int = 1
     parent_start_text: Optional[str] = None
+    has_complex_index: bool = False
 
 
 @dataclass
@@ -38,6 +41,7 @@ class Dependence:
     distance_vector: List
     direction_vector: List[str]
     carried_by: List[str]
+    notes: List[str] = field(default_factory=list)
 
 
 @dataclass

@@ -1,7 +1,7 @@
 from typing import List, Dict, Tuple
 
 from fparser.two.utils import walk
-from fparser.two.Fortran2003 import Assignment_Stmt, Part_Ref, Name, Section_Subscript_List, Call_Stmt, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt
+from fparser.two.Fortran2003 import Assignment_Stmt, Part_Ref, Name, Section_Subscript_List, Call_Stmt, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Function_Reference, Data_Ref
 
 from .ir import ArrayAccess, StatementIR, LoopIR, Dependence, AnalysisResult
 from .utils import is_affine_term, parse_subscripts_text, is_variable_coeff_term
@@ -82,20 +82,24 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
         for s in walk(d, Assignment_Stmt):
             text = str(s)
             ir = StatementIR(raw=text)
-            # LHS
             lhs = s.items[0]
-            if isinstance(lhs, Part_Ref):
+            if isinstance(lhs, (Part_Ref, Data_Ref)):
                 name = lhs.items[0].string if hasattr(lhs, "items") else str(lhs).split("(")[0]
                 subsec = list(walk(lhs, Section_Subscript_List))
                 subscripts = []
                 affine_map = {}
                 nonconst = {}
+                resolved_subs = []
+                complex_idx = bool(list(walk(lhs, Function_Reference)))
                 if subsec:
                     subscripts = parse_subscripts_text(str(subsec[0]))
                     for sub in subscripts:
                         for lv in loop_vars:
                             from .utils import apply_constants
                             subx = apply_constants(sub, consts)
+                            from .utils import is_function_like
+                            if is_function_like(subx):
+                                complex_idx = True
                             at = is_affine_term(subx, lv)
                             if at:
                                 affine_map[lv] = at
@@ -112,20 +116,25 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                         sym = is_symbolic_offset_term(subx, lv)
                                         if sym:
                                             nonconst[lv] = sub
-                ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
-            # RHS reads (array parts only)
-            for ref in walk(s.items[2], Part_Ref):
+                            resolved_subs.append(subx)
+                ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst, resolved_subscripts=resolved_subs or subscripts, complex_index=complex_idx))
+            for ref in walk(s.items[2], (Part_Ref, Data_Ref)):
                 name = ref.items[0].string if hasattr(ref, "items") else str(ref).split("(")[0]
                 subsec = list(walk(ref, Section_Subscript_List))
                 subscripts = []
                 affine_map = {}
                 nonconst = {}
+                resolved_subs = []
+                complex_idx = bool(list(walk(ref, Function_Reference)))
                 if subsec:
                     subscripts = parse_subscripts_text(str(subsec[0]))
                     for sub in subscripts:
                         for lv in loop_vars:
                             from .utils import apply_constants
                             subx = apply_constants(sub, consts)
+                            from .utils import is_function_like
+                            if is_function_like(subx):
+                                complex_idx = True
                             at = is_affine_term(subx, lv)
                             if at:
                                 affine_map[lv] = at
@@ -142,7 +151,8 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                         sym = is_symbolic_offset_term(subx, lv)
                                         if sym:
                                             nonconst[lv] = sub
-                ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
+                            resolved_subs.append(subx)
+                ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst, resolved_subscripts=resolved_subs or subscripts, complex_index=complex_idx))
             # simple reductions: scalar x = x op expr
             if isinstance(lhs, Name):
                 lhs_name = lhs.string.lower()
@@ -152,8 +162,17 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                         ir.reductions[lhs_name] = "sum"
                     elif "*" in rhs_text:
                         ir.reductions[lhs_name] = "product"
+            elif isinstance(lhs, Data_Ref):
+                lhs_text = str(lhs).lower()
+                rhs_text = str(s.items[2]).lower()
+                if lhs_text in rhs_text:
+                    if "+" in rhs_text:
+                        ir.reductions[lhs_text] = "sum"
+                    elif "*" in rhs_text:
+                        ir.reductions[lhs_text] = "product"
             stmt_irs.append(ir)
-        loop_ir = LoopIR(loop_vars=loop_vars, bounds=bounds, body_statements=stmt_irs, node_ref=d, start_text=start_text, end_text=end_text, nest_depth=nest_depth, parent_start_text=parent_map.get(start_text))
+        has_complex = any(any(a.complex_index for a in s.writes + s.reads) for s in stmt_irs)
+        loop_ir = LoopIR(loop_vars=loop_vars, bounds=bounds, body_statements=stmt_irs, node_ref=d, start_text=start_text, end_text=end_text, nest_depth=nest_depth, parent_start_text=parent_map.get(start_text), has_complex_index=has_complex)
         loops.append(loop_ir)
     return loops
 
@@ -212,12 +231,18 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                             carried_by = list(set(carried_by + unknown_lvs))
                         is_trivial = all((d == 0 for d in dist_vec if not isinstance(d, str))) and all((dr == "=" for dr in dir_vec))
                         key = (w.name, tuple(dist_vec), tuple(dir_vec))
-                        if is_trivial and key in seen_trivial_shapes:
-                            pass
-                        else:
-                            if is_trivial:
-                                seen_trivial_shapes.add(key)
-                            deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+                        if not (w.complex_index or r.complex_index):
+                            if is_trivial and key in seen_trivial_shapes:
+                                pass
+                            else:
+                                if is_trivial:
+                                    seen_trivial_shapes.add(key)
+                                notes = []
+                                if w.resolved_subscripts and w.subscripts and w.resolved_subscripts != w.subscripts:
+                                    notes.append(f"const_prop: {w.subscripts} -> {w.resolved_subscripts}")
+                                if r.resolved_subscripts and r.subscripts and r.resolved_subscripts != r.subscripts:
+                                    notes.append(f"const_prop: {r.subscripts} -> {r.resolved_subscripts}")
+                                deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by, notes=notes))
             # 反依赖：读-写
             for r in s1.reads:
                 for w in s2.writes:
@@ -266,12 +291,18 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                         carried_by = list(set(carried_by + unknown_lvs))
                     is_trivial = all((d == 0 for d in dist_vec if not isinstance(d, str))) and all((dr == "=" for dr in dir_vec))
                     key = (w.name, tuple(dist_vec), tuple(dir_vec))
-                    if is_trivial and key in seen_trivial_shapes:
-                        pass
-                    else:
-                        if is_trivial:
-                            seen_trivial_shapes.add(key)
-                        deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+                    if not (w.complex_index or r.complex_index):
+                        if is_trivial and key in seen_trivial_shapes:
+                            pass
+                        else:
+                            if is_trivial:
+                                seen_trivial_shapes.add(key)
+                            notes = []
+                            if w.resolved_subscripts and w.subscripts and w.resolved_subscripts != w.subscripts:
+                                notes.append(f"const_prop: {w.subscripts} -> {w.resolved_subscripts}")
+                            if r.resolved_subscripts and r.subscripts and r.resolved_subscripts != r.subscripts:
+                                notes.append(f"const_prop: {r.subscripts} -> {r.resolved_subscripts}")
+                            deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by, notes=notes))
             # 输出依赖：写-写
             for w1 in s1.writes:
                 for w2 in s2.writes:
@@ -320,12 +351,18 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                         carried_by = list(set(carried_by + unknown_lvs))
                     is_trivial = all((d == 0 for d in dist_vec if not isinstance(d, str))) and all((dr == "=" for dr in dir_vec))
                     key = (w1.name, tuple(dist_vec), tuple(dir_vec))
-                    if is_trivial and key in seen_trivial_shapes:
-                        pass
-                    else:
-                        if is_trivial:
-                            seen_trivial_shapes.add(key)
-                        deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w1.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+                    if not (w1.complex_index or w2.complex_index):
+                        if is_trivial and key in seen_trivial_shapes:
+                            pass
+                        else:
+                            if is_trivial:
+                                seen_trivial_shapes.add(key)
+                            notes = []
+                            if w1.resolved_subscripts and w1.subscripts and w1.resolved_subscripts != w1.subscripts:
+                                notes.append(f"const_prop: {w1.subscripts} -> {w1.resolved_subscripts}")
+                            if w2.resolved_subscripts and w2.subscripts and w2.resolved_subscripts != w2.subscripts:
+                                notes.append(f"const_prop: {w2.subscripts} -> {w2.resolved_subscripts}")
+                            deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w1.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by, notes=notes))
     return deps
 
 
@@ -367,6 +404,9 @@ def analyze_loop(loop: LoopIR) -> AnalysisResult:
     lastprivate_vars = sorted(list(lhs_scalars - rhs_scalars))
     is_parallel = True
     reason = None
+    if loop.has_complex_index:
+        is_parallel = False
+        reason = "complex index in subscripts not analyzed"
     current_lv = loop.loop_vars[0] if loop.loop_vars else None
     idx_current = 0
     for d in deps:
