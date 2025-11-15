@@ -49,26 +49,29 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                 step = parts[2] if len(parts) > 2 else None
                 loop_vars = [var]
                 bounds[var] = (lb, ub, step)
-        nest_depth = 1
-        for inner in d.content[1:-1] if hasattr(d, "content") else []:
-            if isinstance(inner, Block_Nonlabel_Do_Construct):
-                istmt = None
-                for c in walk(inner, Nonlabel_Do_Stmt):
-                    istmt = c
-                    break
-                if istmt:
-                    s2 = str(istmt)
-                    if "=" in s2 and "," in s2:
-                        head2 = s2[s2.find("DO") + 2:].strip()
-                        var2 = head2.split("=")[0].strip()
-                        rest2 = head2.split("=")[1].strip()
-                        parts2 = [p.strip() for p in rest2.split(",")]
-                        lb2 = parts2[0]
-                        ub2 = parts2[1] if len(parts2) > 1 else None
-                        step2 = parts2[2] if len(parts2) > 2 else None
-                        loop_vars.append(var2)
-                        bounds[var2] = (lb2, ub2, step2)
-                        nest_depth += 1
+        def collect_inner_loops(node):
+            for inner in getattr(node, "content", [])[1:-1]:
+                if isinstance(inner, Block_Nonlabel_Do_Construct):
+                    istmt = None
+                    for c in walk(inner, Nonlabel_Do_Stmt):
+                        istmt = c
+                        break
+                    if istmt:
+                        s2 = str(istmt)
+                        if "=" in s2 and "," in s2:
+                            head2 = s2[s2.find("DO") + 2:].strip()
+                            var2 = head2.split("=")[0].strip()
+                            rest2 = head2.split("=")[1].strip()
+                            parts2 = [p.strip() for p in rest2.split(",")]
+                            lb2 = parts2[0]
+                            ub2 = parts2[1] if len(parts2) > 1 else None
+                            step2 = parts2[2] if len(parts2) > 2 else None
+                            if var2 not in loop_vars:
+                                loop_vars.append(var2)
+                            bounds[var2] = (lb2, ub2, step2)
+                    collect_inner_loops(inner)
+        collect_inner_loops(d)
+        nest_depth = len(loop_vars) if loop_vars else 1
         # Collect statements in body (include nested assignments within inner loops)
         stmt_irs: List[StatementIR] = []
         for s in walk(d, Assignment_Stmt):
