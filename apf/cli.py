@@ -1,3 +1,13 @@
+"""Command-line interface for the auto-parallel analysis and transform tool.
+
+Usage:
+    python3 -m apf.cli <file.f90> --report [--no-trivial]
+    python3 -m apf.cli <file.f90> --apply --output out.f90 [--analyze-derived]
+
+Flags:
+    --no-trivial       Hide trivial (=, zero-distance) dependencies in report.
+    --analyze-derived  Enable derived-type member analysis and basic transforms.
+"""
 import argparse
 import re
 from typing import List
@@ -8,6 +18,15 @@ from .transform import insert_openmp_directives, build_omp_clauses, TransformOpt
 
 
 def analyze_file(path: str, no_trivial: bool = False) -> str:
+    """Analyze a Fortran file and return a human-readable dependence report.
+
+    Args:
+        path: Path to a Fortran source file.
+        no_trivial: When True, hides trivial dependencies in the output.
+
+    Returns:
+        Multi-line string report per loop including dependences and decision.
+    """
     tree = parse_file(path, ignore_comments=False)
     loops = extract_loop_ir(tree)
     report_lines: List[str] = []
@@ -40,6 +59,19 @@ def analyze_file(path: str, no_trivial: bool = False) -> str:
 
 
 def transform_file(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto", analyze_derived: bool = False) -> str:
+    """Apply OpenMP directives to loops deemed parallel, optionally transforming derived-type patterns.
+
+    Args:
+        path: Input Fortran file.
+        output: Output file path to write transformed source.
+        style: OpenMP insertion style ('parallel_do', 'do', 'parallel_region').
+        schedule: Schedule clause value.
+        collapse: 'auto' or integer ≥2 for collapse on nested loops.
+        analyze_derived: Enable pattern-based transforms for derived-type member updates.
+
+    Returns:
+        Summary string with applied loop count and output path.
+    """
     tree = parse_file(path, ignore_comments=False)
     loops = extract_loop_ir(tree)
     with open(path, "r") as f:
@@ -140,6 +172,7 @@ def transform_file(path: str, output: str, style: str = "parallel_do", schedule:
 
 
 def main():
+    """Entry point for CLI invocation."""
     p = argparse.ArgumentParser(description="Fortran auto-parallel checker and transformer (fparser-based)")
     p.add_argument("input", help="input Fortran file (.f90)")
     p.add_argument("--report", action="store_true", help="only run analysis and print report")

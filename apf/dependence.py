@@ -10,6 +10,21 @@ from .symbols import collect_intent_in, collect_intent_out, collect_intent_inout
 
 
 def extract_loop_ir(parse_tree) -> List[LoopIR]:
+    """Extract LoopIRs from a Fortran parse tree.
+
+    For each `DO` construct, collects loop variables, bounds, nested structure,
+    and assignment statements (including nested ones).
+
+    Args:
+        parse_tree: fparser2 parse tree.
+
+    Returns:
+        List of LoopIR objects in traversal order (outer to inner).
+
+    Example:
+        Given nested loops `do i; do j; A(i,j)=...; end do; end do`, returns a LoopIR
+        with `loop_vars=['i','j']` and one StatementIR for the assignment.
+    """
     loops: List[LoopIR] = []
     parent_map: Dict[str, str] = {}
     for d in walk(parse_tree, Block_Nonlabel_Do_Construct):
@@ -178,6 +193,20 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
 
 
 def compute_dependences(loop: LoopIR) -> List[Dependence]:
+    """Compute dependence relations for a loop body.
+
+    Produces write-read (true), read-write (anti), and write-write (output) dependences.
+    Distance/direction vectors align with `loop.loop_vars` order.
+
+    Args:
+        loop: LoopIR to analyze.
+
+    Returns:
+        List of Dependence entries.
+
+    Example:
+        For `A(i)=A(i-1)`, distance `[1]`, direction `['<']`, carried_by `['i']`.
+    """
     deps: List[Dependence] = []
     seen_trivial_shapes = set()
     for i, s1 in enumerate(loop.body_statements):
@@ -367,6 +396,19 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
 
 
 def analyze_loop(loop: LoopIR) -> AnalysisResult:
+    """Analyze a loop and decide OpenMP parallelizability.
+
+    Checks dependences, variable classifications, function purity, and complex indices.
+
+    Args:
+        loop: LoopIR representing a single loop.
+
+    Returns:
+        AnalysisResult with dependences and parallelization decision.
+
+    Example:
+        A loop with `A(i)=A(i-1)` yields `is_parallel=False` with reason carrying `i`.
+    """
     deps = compute_dependences(loop)
     reduction_vars = {}
     for s in loop.body_statements:
