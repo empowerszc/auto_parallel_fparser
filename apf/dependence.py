@@ -81,6 +81,7 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                 subsec = list(walk(lhs, Section_Subscript_List))
                 subscripts = []
                 affine_map = {}
+                nonconst = {}
                 if subsec:
                     subscripts = parse_subscripts_text(str(subsec[0]))
                     for sub in subscripts:
@@ -91,15 +92,15 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                             else:
                                 vc = is_variable_coeff_term(sub, lv)
                                 if vc:
-                                    ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
-                                    break
-                ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
+                                    nonconst[lv] = vc
+                ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
             # RHS reads (array parts only)
             for ref in walk(s.items[2], Part_Ref):
                 name = ref.items[0].string if hasattr(ref, "items") else str(ref).split("(")[0]
                 subsec = list(walk(ref, Section_Subscript_List))
                 subscripts = []
                 affine_map = {}
+                nonconst = {}
                 if subsec:
                     subscripts = parse_subscripts_text(str(subsec[0]))
                     for sub in subscripts:
@@ -110,9 +111,8 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                             else:
                                 vc = is_variable_coeff_term(sub, lv)
                                 if vc:
-                                    ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
-                                    break
-                ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
+                                    nonconst[lv] = vc
+                ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
             # simple reductions: scalar x = x op expr
             if isinstance(lhs, Name):
                 lhs_name = lhs.string.lower()
@@ -141,7 +141,7 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                         dist_vec = []
                         dir_vec = []
                         carried_by = []
-                        unknown = False
+                        unknown_lvs = []
                         for lv in loop.loop_vars:
                             if (lv in w.affine_map and lv in r.affine_map):
                                 cw, kw = w.affine_map[lv]
@@ -167,18 +167,18 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                                         dir_vec.append("<" if kfound > 0 else (">" if kfound < 0 else "="))
                                         carried_by.append(lv)
                                     else:
-                                        unknown = True
+                                        unknown_lvs.append(lv)
                                         dist_vec.append(0)
                                         dir_vec.append("?")
                             elif (lv in getattr(w, 'nonconst_coeffs', {}) or lv in getattr(r, 'nonconst_coeffs', {})):
-                                unknown = True
+                                unknown_lvs.append(lv)
                                 dist_vec.append(0)
                                 dir_vec.append("?")
                             else:
                                 dist_vec.append(0)
                                 dir_vec.append("=")
-                        if unknown:
-                            carried_by = list(loop.loop_vars)
+                        if unknown_lvs:
+                            carried_by = list(set(carried_by + unknown_lvs))
                         deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
     return deps
 
