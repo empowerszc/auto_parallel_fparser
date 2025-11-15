@@ -133,7 +133,8 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
     deps: List[Dependence] = []
     for i, s1 in enumerate(loop.body_statements):
         for j, s2 in enumerate(loop.body_statements):
-            if j <= i:
+            # 允许同一语句内的读写对参与跨迭代依赖判断（例如 A(i) = A(i+1)）
+            if j < i:
                 continue
             for w in s1.writes:
                 for r in s2.reads:
