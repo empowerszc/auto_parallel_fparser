@@ -34,20 +34,45 @@ def transform_file(path: str, output: str, style: str = "parallel_do", schedule:
     transformed = lines[:]
     applied = 0
     protected = []
+    # 构建父子关系映射
+    loop_by_start = {l.start_text: l for l in loops}
+    children = {}
+    for l in loops:
+        if l.parent_start_text:
+            children.setdefault(l.parent_start_text, []).append(l)
     for loop in loops:
         ar = analyze_loop(loop)
         if ar.is_parallel:
             clauses = build_omp_clauses(ar)
-            col = None
+            # 自适应并行策略
+            local_style = style
+            local_collapse = None
             if collapse == "auto":
-                col = loop.nest_depth if loop.nest_depth and loop.nest_depth > 1 else None
+                if loop.nest_depth and loop.nest_depth > 1:
+                    cs = children.get(loop.start_text, [])
+                    all_inner_parallel = True
+                    any_inner_reduction = False
+                    for c in cs:
+                        car = analyze_loop(c)
+                        if not car.is_parallel:
+                            all_inner_parallel = False
+                        if car.reduction_vars:
+                            any_inner_reduction = True
+                    if all_inner_parallel:
+                        local_style = "parallel_do"
+                        local_collapse = loop.nest_depth
+                    else:
+                        local_style = "parallel_region"
+                        local_collapse = None
+                else:
+                    local_collapse = None
             else:
                 try:
                     ci = int(collapse)
-                    col = ci if ci > 1 else None
+                    local_collapse = ci if ci > 1 else None
                 except Exception:
-                    col = None
-            opts = TransformOptions(style=style, schedule=schedule, collapse=col)
+                    local_collapse = None
+            opts = TransformOptions(style=local_style, schedule=schedule, collapse=local_collapse)
             from .transform import find_loop_range
             sidx, eidx = find_loop_range(transformed, loop.start_text, loop.end_text)
             if sidx is None or eidx is None:
@@ -62,7 +87,7 @@ def transform_file(path: str, output: str, style: str = "parallel_do", schedule:
             transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth)
             # 变换后根据AST文本重新定位保护区间，避免 collapse 外层后内层重复并行
             nsidx, neidx = find_loop_range(transformed, loop.start_text, loop.end_text)
-            if col and nsidx is not None and neidx is not None:
+            if local_collapse and nsidx is not None and neidx is not None:
                 protected.append((nsidx, neidx))
             applied += 1
     with open(output, "w") as f:

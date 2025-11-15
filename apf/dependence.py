@@ -6,7 +6,7 @@ from fparser.two.Fortran2003 import Assignment_Stmt, Part_Ref, Name, Section_Sub
 from .ir import ArrayAccess, StatementIR, LoopIR, Dependence, AnalysisResult
 from .utils import is_affine_term, parse_subscripts_text, is_variable_coeff_term
 from .functions import find_pure_functions
-from .symbols import collect_intent_in
+from .symbols import collect_intent_in, collect_intent_out, collect_intent_inout, collect_value_attr
 
 
 def extract_loop_ir(parse_tree) -> List[LoopIR]:
@@ -153,17 +153,18 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                                     if k != 0:
                                         carried_by.append(lv)
                                 else:
-                                    lb_s, ub_s, _ = loop.bounds.get(lv, (None, None, None))
+                                    lb_s, ub_s, step_s = loop.bounds.get(lv, (None, None, None))
                                     try:
                                         lb = int(str(lb_s)) if lb_s is not None else None
                                         ub = int(str(ub_s)) if ub_s is not None else None
+                                        stride = int(str(step_s)) if step_s is not None else 1
                                     except Exception:
-                                        lb, ub = None, None
+                                        lb, ub, stride = None, None, 1
                                     from .utils import find_k_feasible
-                                    kfound = find_k_feasible(cw, kw, cr, kr, lb, ub)
+                                    kfound = find_k_feasible(cw, kw, cr, kr, lb, ub, stride=stride)
                                     if kfound is not None:
                                         dist_vec.append(kfound)
-                                        dir_vec.append("<" if kfound > 0 else ">")
+                                        dir_vec.append("<" if kfound > 0 else (">" if kfound < 0 else "="))
                                         carried_by.append(lv)
                                     else:
                                         unknown = True
@@ -213,7 +214,11 @@ def analyze_loop(loop: LoopIR) -> AnalysisResult:
             if nm not in arrays and nm not in loop.loop_vars:
                 lhs_scalars.add(nm)
     decl_in = collect_intent_in(loop.node_ref)
-    firstprivate_vars = sorted(list((rhs_scalars | (rhs_scalars & decl_in)) - lhs_scalars))
+    decl_out = collect_intent_out(loop.node_ref)
+    decl_inout = collect_intent_inout(loop.node_ref)
+    decl_value = collect_value_attr(loop.node_ref)
+    firstprivate_vars = sorted(list(((rhs_scalars | decl_value | decl_in) - lhs_scalars)))
+    lastprivate_vars = sorted(list(lhs_scalars - rhs_scalars))
     is_parallel = True
     reason = None
     for d in deps:
@@ -252,4 +257,4 @@ def analyze_loop(loop: LoopIR) -> AnalysisResult:
             is_parallel = False
             if reason is None:
                 reason = f"impure function call '{name}' inside loop"
-    return AnalysisResult(loop=loop, dependences=deps, is_parallel=is_parallel, reason=reason, reduction_vars=reduction_vars, private_vars=private_vars, firstprivate_vars=firstprivate_vars, shared_vars=list(arrays))
+    return AnalysisResult(loop=loop, dependences=deps, is_parallel=is_parallel, reason=reason, reduction_vars=reduction_vars, private_vars=private_vars, firstprivate_vars=firstprivate_vars, shared_vars=list(arrays), lastprivate_vars=lastprivate_vars)

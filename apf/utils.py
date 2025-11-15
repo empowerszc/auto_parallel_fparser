@@ -53,7 +53,7 @@ def parse_subscripts_text(section_text: str) -> list:
     return parts
 
 
-def find_k_feasible(cw: int, kw: int, cr: int, kr: int, lb: int | None, ub: int | None, max_k: int = 16):
+def find_k_feasible(cw: int, kw: int, cr: int, kr: int, lb: int | None, ub: int | None, stride: int | None = 1, max_k: int = 64):
     if cw == cr:
         k = kw - kr
         return k if k != 0 else 0
@@ -67,5 +67,8 @@ def find_k_feasible(cw: int, kw: int, cr: int, kr: int, lb: int | None, ub: int 
         if num % den == 0:
             i = num // den
             if lb is None or ub is None or (lb <= i <= ub):
+                if stride and stride > 1 and lb is not None:
+                    if (i - lb) % stride != 0:
+                        continue
                 return k
     return None

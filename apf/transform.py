@@ -51,6 +51,8 @@ def build_omp_clauses(ar: AnalysisResult) -> str:
         clauses.append(f"private({', '.join(ar.private_vars)})")
     if ar.firstprivate_vars:
         clauses.append(f"firstprivate({', '.join(ar.firstprivate_vars)})")
+    if ar.lastprivate_vars:
+        clauses.append(f"lastprivate({', '.join(ar.lastprivate_vars)})")
     if ar.reduction_vars:
         red = []
         for v, kind in ar.reduction_vars.items():

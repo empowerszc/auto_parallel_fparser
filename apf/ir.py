@@ -50,3 +50,4 @@ class AnalysisResult:
     private_vars: List[str]
     firstprivate_vars: List[str] = field(default_factory=list)
     shared_vars: List[str] = field(default_factory=list)
+    lastprivate_vars: List[str] = field(default_factory=list)
