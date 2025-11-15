@@ -229,12 +229,17 @@ def analyze_loop(loop: LoopIR) -> AnalysisResult:
     lastprivate_vars = sorted(list(lhs_scalars - rhs_scalars))
     is_parallel = True
     reason = None
+    current_lv = loop.loop_vars[0] if loop.loop_vars else None
+    idx_current = 0
     for d in deps:
-        if any(v != 0 for v in d.distance_vector) or any(x == "?" for x in d.direction_vector):
-            # loop-carried
+        try:
+            val = d.distance_vector[idx_current] if isinstance(d.distance_vector, list) else None
+            direc = d.direction_vector[idx_current] if isinstance(d.direction_vector, list) else None
+        except Exception:
+            val, direc = None, None
+        if val not in (0, None) or direc == "?":
             is_parallel = False
-            reason = f"loop-carried/unknown dependence on {d.array} with distance {d.distance_vector}"
-            # reductions are allowed if only dependence is reduction on scalar
+            reason = f"loop-carried/unknown dependence on {d.array} along {current_lv} with distance {d.distance_vector}"
             if d.array in reduction_vars:
                 is_parallel = True
                 reason = None
