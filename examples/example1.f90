@@ -1,0 +1,11 @@
+program demo
+  implicit none
+  integer :: i, n
+  real :: a(100), b(100), s
+  n = 100
+  s = 0.0
+  do i = 1, n
+    a(i) = b(i) + 1.0
+    s = s + a(i)
+  end do
+end program demo
