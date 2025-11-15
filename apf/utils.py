@@ -24,11 +24,21 @@ def is_affine_term(expr: str, var: str):
 
 
 def is_variable_coeff_term(expr: str, var: str):
-    m = re.fullmatch(rf"([A-Za-z_]\w*)\s*\*\s*{var}\s*([+-]\s*\d+)?", expr.strip(), re.IGNORECASE)
-    if m:
-        coef_var = m.group(1)
-        return coef_var
+    s = expr.strip()
+    m1 = re.fullmatch(rf"([A-Za-z_]\w*|\([^\)]*\))\s*\*\s*{var}(\s*[+-]\s*\d+)?", s, re.IGNORECASE)
+    if m1:
+        return m1.group(1)
+    m2 = re.fullmatch(rf"{var}\s*\*\s*([A-Za-z_]\w*|\([^\)]*\))(\s*[+-]\s*\d+)?", s, re.IGNORECASE)
+    if m2:
+        return m2.group(1)
     return None
+
+
+def has_multiplicative_var(expr: str, var: str):
+    s = expr.strip()
+    if "*" in s and re.search(rf"\b{var}\b", s, re.IGNORECASE):
+        return True
+    return False
 
 
 def parse_subscripts_text(section_text: str) -> list:

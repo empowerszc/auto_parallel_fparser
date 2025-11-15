@@ -93,6 +93,10 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                 vc = is_variable_coeff_term(sub, lv)
                                 if vc:
                                     nonconst[lv] = vc
+                                else:
+                                    from .utils import has_multiplicative_var
+                                    if has_multiplicative_var(sub, lv):
+                                        nonconst[lv] = sub
                 ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
             # RHS reads (array parts only)
             for ref in walk(s.items[2], Part_Ref):
@@ -112,6 +116,10 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                 vc = is_variable_coeff_term(sub, lv)
                                 if vc:
                                     nonconst[lv] = vc
+                                else:
+                                    from .utils import has_multiplicative_var
+                                    if has_multiplicative_var(sub, lv):
+                                        nonconst[lv] = sub
                 ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
             # simple reductions: scalar x = x op expr
             if isinstance(lhs, Name):
