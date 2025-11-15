@@ -41,6 +41,19 @@ def has_multiplicative_var(expr: str, var: str):
     return False
 
 
+def is_symbolic_offset_term(expr: str, var: str):
+    s = expr.strip()
+    patt = rf"(\([^\)]*\)|[A-Za-z_]\w*)\s*(\+|-)\s*{var}"
+    m1 = re.fullmatch(patt, s, re.IGNORECASE)
+    if m1:
+        return m1.group(1), m1.group(2)
+    patt2 = rf"{var}\s*(\+|-)\s*(\([^\)]*\)|[A-Za-z_]\w*)"
+    m2 = re.fullmatch(patt2, s, re.IGNORECASE)
+    if m2:
+        return m2.group(2), m2.group(1)
+    return None
+
+
 def parse_subscripts_text(section_text: str) -> list:
     inner = section_text.strip()
     if inner.startswith("(") and inner.endswith(")"):

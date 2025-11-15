@@ -100,6 +100,11 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                     from .utils import has_multiplicative_var
                                     if has_multiplicative_var(sub, lv):
                                         nonconst[lv] = sub
+                                    else:
+                                        from .utils import is_symbolic_offset_term
+                                        sym = is_symbolic_offset_term(sub, lv)
+                                        if sym:
+                                            nonconst[lv] = sub
                 ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
             # RHS reads (array parts only)
             for ref in walk(s.items[2], Part_Ref):
@@ -123,6 +128,11 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                                     from .utils import has_multiplicative_var
                                     if has_multiplicative_var(sub, lv):
                                         nonconst[lv] = sub
+                                    else:
+                                        from .utils import is_symbolic_offset_term
+                                        sym = is_symbolic_offset_term(sub, lv)
+                                        if sym:
+                                            nonconst[lv] = sub
                 ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst))
             # simple reductions: scalar x = x op expr
             if isinstance(lhs, Name):
@@ -191,6 +201,100 @@ def compute_dependences(loop: LoopIR) -> List[Dependence]:
                         if unknown_lvs:
                             carried_by = list(set(carried_by + unknown_lvs))
                         deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+            # 反依赖：读-写
+            for r in s1.reads:
+                for w in s2.writes:
+                    if w.name != r.name:
+                        continue
+                    dist_vec = []
+                    dir_vec = []
+                    carried_by = []
+                    unknown_lvs = []
+                    for lv in loop.loop_vars:
+                        if (lv in w.affine_map and lv in r.affine_map):
+                            cw, kw = w.affine_map[lv]
+                            cr, kr = r.affine_map[lv]
+                            if cw == cr:
+                                k = kr - kw
+                                dist_vec.append(k)
+                                dir_vec.append("<" if k > 0 else (">" if k < 0 else "="))
+                                if k != 0:
+                                    carried_by.append(lv)
+                            else:
+                                lb_s, ub_s, step_s = loop.bounds.get(lv, (None, None, None))
+                                try:
+                                    lb = int(str(lb_s)) if lb_s is not None else None
+                                    ub = int(str(ub_s)) if ub_s is not None else None
+                                    stride = int(str(step_s)) if step_s is not None else 1
+                                except Exception:
+                                    lb, ub, stride = None, None, 1
+                                from .utils import find_k_feasible
+                                kfound = find_k_feasible(cr, kr, cw, kw, lb, ub, stride=stride)
+                                if kfound is not None:
+                                    dist_vec.append(kfound)
+                                    dir_vec.append("<" if kfound > 0 else (">" if kfound < 0 else "="))
+                                    carried_by.append(lv)
+                                else:
+                                    unknown_lvs.append(lv)
+                                    dist_vec.append("?")
+                                    dir_vec.append("?")
+                        elif (lv in getattr(w, 'nonconst_coeffs', {}) or lv in getattr(r, 'nonconst_coeffs', {})):
+                            unknown_lvs.append(lv)
+                            dist_vec.append("?")
+                            dir_vec.append("?")
+                        else:
+                            dist_vec.append(0)
+                            dir_vec.append("=")
+                    if unknown_lvs:
+                        carried_by = list(set(carried_by + unknown_lvs))
+                    deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
+            # 输出依赖：写-写
+            for w1 in s1.writes:
+                for w2 in s2.writes:
+                    if w1.name != w2.name:
+                        continue
+                    dist_vec = []
+                    dir_vec = []
+                    carried_by = []
+                    unknown_lvs = []
+                    for lv in loop.loop_vars:
+                        if (lv in w1.affine_map and lv in w2.affine_map):
+                            c1, k1 = w1.affine_map[lv]
+                            c2, k2 = w2.affine_map[lv]
+                            if c1 == c2:
+                                k = k1 - k2
+                                dist_vec.append(k)
+                                dir_vec.append("<" if k > 0 else (">" if k < 0 else "="))
+                                if k != 0:
+                                    carried_by.append(lv)
+                            else:
+                                lb_s, ub_s, step_s = loop.bounds.get(lv, (None, None, None))
+                                try:
+                                    lb = int(str(lb_s)) if lb_s is not None else None
+                                    ub = int(str(ub_s)) if ub_s is not None else None
+                                    stride = int(str(step_s)) if step_s is not None else 1
+                                except Exception:
+                                    lb, ub, stride = None, None, 1
+                                from .utils import find_k_feasible
+                                kfound = find_k_feasible(c1, k1, c2, k2, lb, ub, stride=stride)
+                                if kfound is not None:
+                                    dist_vec.append(kfound)
+                                    dir_vec.append("<" if kfound > 0 else (">" if kfound < 0 else "="))
+                                    carried_by.append(lv)
+                                else:
+                                    unknown_lvs.append(lv)
+                                    dist_vec.append("?")
+                                    dir_vec.append("?")
+                        elif (lv in getattr(w1, 'nonconst_coeffs', {}) or lv in getattr(w2, 'nonconst_coeffs', {})):
+                            unknown_lvs.append(lv)
+                            dist_vec.append("?")
+                            dir_vec.append("?")
+                        else:
+                            dist_vec.append(0)
+                            dir_vec.append("=")
+                    if unknown_lvs:
+                        carried_by = list(set(carried_by + unknown_lvs))
+                    deps.append(Dependence(src_stmt=i, dst_stmt=j, array=w1.name, distance_vector=dist_vec, direction_vector=dir_vec, carried_by=carried_by))
     return deps
 
 

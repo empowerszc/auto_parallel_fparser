@@ -12,7 +12,15 @@ def analyze_file(path: str) -> str:
     report_lines: List[str] = []
     for idx, loop in enumerate(loops):
         ar = analyze_loop(loop)
-        report_lines.append(f"Loop {idx+1}: {loop.start_text}")
+        from .transform import find_loop_range
+        try:
+            with open(path, "r") as f:
+                lines = f.readlines()
+            sidx, eidx = find_loop_range(lines, loop.start_text, loop.end_text)
+        except Exception:
+            sidx, eidx = (None, None)
+        loc = f"{path}:{(sidx+1) if sidx is not None else '?'}"
+        report_lines.append(f"Loop {idx+1} @ {loc}: {loop.start_text}")
         for d in ar.dependences:
             report_lines.append(
                 f"  dep {d.array}: distance={d.distance_vector}, direction={d.direction_vector}, carried_by={d.carried_by}"
