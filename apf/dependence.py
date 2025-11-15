@@ -69,60 +69,59 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                         loop_vars.append(var2)
                         bounds[var2] = (lb2, ub2, step2)
                         nest_depth += 1
-        # Collect statements in body
+        # Collect statements in body (include nested assignments within inner loops)
         stmt_irs: List[StatementIR] = []
-        for s in d.content[1:-1] if hasattr(d, "content") else []:
+        for s in walk(d, Assignment_Stmt):
             text = str(s)
             ir = StatementIR(raw=text)
-            if isinstance(s, Assignment_Stmt):
-                # LHS
-                lhs = s.items[0]
-                if isinstance(lhs, Part_Ref):
-                    name = lhs.items[0].string if hasattr(lhs, "items") else str(lhs).split("(")[0]
-                    subsec = list(walk(lhs, Section_Subscript_List))
-                    subscripts = []
-                    affine_map = {}
-                    if subsec:
-                        subscripts = parse_subscripts_text(str(subsec[0]))
-                        for sub in subscripts:
-                            for lv in loop_vars:
-                                at = is_affine_term(sub, lv)
-                                if at:
-                                    affine_map[lv] = at
-                                else:
-                                    vc = is_variable_coeff_term(sub, lv)
-                                    if vc:
-                                        ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
-                                        break
-                    ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
-                # RHS reads (array parts only)
-                for ref in walk(s.items[2], Part_Ref):
-                    name = ref.items[0].string if hasattr(ref, "items") else str(ref).split("(")[0]
-                    subsec = list(walk(ref, Section_Subscript_List))
-                    subscripts = []
-                    affine_map = {}
-                    if subsec:
-                        subscripts = parse_subscripts_text(str(subsec[0]))
-                        for sub in subscripts:
-                            for lv in loop_vars:
-                                at = is_affine_term(sub, lv)
-                                if at:
-                                    affine_map[lv] = at
-                                else:
-                                    vc = is_variable_coeff_term(sub, lv)
-                                    if vc:
-                                        ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
-                                        break
-                    ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
-                # simple reductions: scalar x = x op expr
-                if isinstance(lhs, Name):
-                    lhs_name = lhs.string.lower()
-                    rhs_text = str(s.items[2]).lower()
-                    if lhs_name in rhs_text:
-                        if "+" in rhs_text:
-                            ir.reductions[lhs_name] = "sum"
-                        elif "*" in rhs_text:
-                            ir.reductions[lhs_name] = "product"
+            # LHS
+            lhs = s.items[0]
+            if isinstance(lhs, Part_Ref):
+                name = lhs.items[0].string if hasattr(lhs, "items") else str(lhs).split("(")[0]
+                subsec = list(walk(lhs, Section_Subscript_List))
+                subscripts = []
+                affine_map = {}
+                if subsec:
+                    subscripts = parse_subscripts_text(str(subsec[0]))
+                    for sub in subscripts:
+                        for lv in loop_vars:
+                            at = is_affine_term(sub, lv)
+                            if at:
+                                affine_map[lv] = at
+                            else:
+                                vc = is_variable_coeff_term(sub, lv)
+                                if vc:
+                                    ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
+                                    break
+                ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
+            # RHS reads (array parts only)
+            for ref in walk(s.items[2], Part_Ref):
+                name = ref.items[0].string if hasattr(ref, "items") else str(ref).split("(")[0]
+                subsec = list(walk(ref, Section_Subscript_List))
+                subscripts = []
+                affine_map = {}
+                if subsec:
+                    subscripts = parse_subscripts_text(str(subsec[0]))
+                    for sub in subscripts:
+                        for lv in loop_vars:
+                            at = is_affine_term(sub, lv)
+                            if at:
+                                affine_map[lv] = at
+                            else:
+                                vc = is_variable_coeff_term(sub, lv)
+                                if vc:
+                                    ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs={lv: vc}))
+                                    break
+                ir.reads.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map))
+            # simple reductions: scalar x = x op expr
+            if isinstance(lhs, Name):
+                lhs_name = lhs.string.lower()
+                rhs_text = str(s.items[2]).lower()
+                if lhs_name in rhs_text:
+                    if "+" in rhs_text:
+                        ir.reductions[lhs_name] = "sum"
+                    elif "*" in rhs_text:
+                        ir.reductions[lhs_name] = "product"
             stmt_irs.append(ir)
         loop_ir = LoopIR(loop_vars=loop_vars, bounds=bounds, body_statements=stmt_irs, node_ref=d, start_text=start_text, end_text=end_text, nest_depth=nest_depth, parent_start_text=parent_map.get(start_text))
         loops.append(loop_ir)
