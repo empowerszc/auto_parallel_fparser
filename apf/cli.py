@@ -83,20 +83,22 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
     for l in loops:
         if l.parent_start_text:
             children.setdefault(l.parent_start_text, []).append(l)
-    # 1) 派生类型原子更新：改为 AST 方式插入
-    if analyze_derived:
-        from .transform import insert_atomic_update_for_derived
-        for loop in loops:
-            try:
-                insert_atomic_update_for_derived(loop.node_ref)
-            except Exception:
-                pass
-    # 2) 对可并行循环在 AST 上插入 OpenMP：保持与行级逻辑一致的 collapse/样式选择
+    # 1) 派生类型：采用“局部临时变量 + 循环后写回”的重写策略，不插入 atomic
+    # 2) 重写派生成员到临时变量（按循环体 LHS 成员）：并在插入 OpenMP 前替换归约名
     for loop in loops:
         ar = analyze_loop(loop)
         if not ar.is_parallel or loop.has_complex_index:
             continue
+        name_map = {}
+        if analyze_derived:
+            try:
+                from .transform import rewrite_derived_members_to_temps
+                name_map = rewrite_derived_members_to_temps(loop.node_ref)
+            except Exception:
+                name_map = {}
         clauses = build_omp_clauses(ar)
+        for k, v in name_map.items():
+            clauses = clauses.replace(k, v)
         # 自适应 collapse 策略（同 transform_file_line_fixed）：外层并行且所有内层并行时合并
         local_style = style
         local_collapse = None

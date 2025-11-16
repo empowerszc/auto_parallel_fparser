@@ -1,5 +1,5 @@
 from typing import List, Tuple, Optional
-from fparser.two.Fortran2003 import Comment, Directive, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Assignment_Stmt, Data_Ref
+from fparser.two.Fortran2003 import Comment, Directive, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Assignment_Stmt, Data_Ref, Type_Declaration_Stmt
 from fparser.common.readfortran import FortranStringReader
 
 from .ir import AnalysisResult
@@ -178,6 +178,168 @@ def insert_atomic_update_for_derived(loop_node: Block_Nonlabel_Do_Construct):
                     continue
         new_content.append(n)
     loop_node.content = new_content
+
+
+def _find_parent_with_content(node):
+    p = getattr(node, "parent", None)
+    while p is not None and not hasattr(p, "content"):
+        p = getattr(p, "parent", None)
+    return p
+
+
+def _infer_component_type(root, comp_name: str) -> str:
+    # 尝试从类型定义中推断成员的基本类型（REAL/INTEGER 等），失败则默认 REAL
+    try:
+        from fparser.two.utils import walk
+        from fparser.two.Fortran2003 import Type_Declaration_Stmt, Entity_Decl
+        for td in walk(root, Type_Declaration_Stmt):
+            txt = str(td).strip().upper()
+            for e in walk(td, Entity_Decl):
+                try:
+                    nm = e.items[0].string.lower()
+                except Exception:
+                    nm = None
+                if nm == comp_name.lower():
+                    # 形如 "REAL, ALLOCATABLE :: data_arr(:)" 提取前半部分基本类型
+                    base = txt.split("::")[0].strip()
+                    # 移除属性，仅保留基本类型名
+                    base = base.split(",")[0].strip()
+                    return base.capitalize()
+    except Exception:
+        pass
+    return "REAL"
+
+
+def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> dict:
+    # 识别循环体内赋值语句的派生类型成员（含标量与数组），引入局部临时变量并替换，循环后写回
+    from fparser.two.utils import walk
+    from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Section_Subscript_List, Name
+    parent = _find_parent_with_content(loop_node)
+    if parent is None:
+        return {}
+    root = parent
+    while hasattr(root, "parent") and root.parent is not None:
+        root = root.parent
+    # 收集要处理的成员：仅针对作为 LHS 的派生成员（需要写回）
+    members = {}
+    for a in walk(loop_node, Assignment_Stmt):
+        items = getattr(a, "items", [])
+        lhs = items[0] if items else None
+        if isinstance(lhs, (Data_Ref, Part_Ref)):
+            txt_full = str(lhs).strip()
+            names = [n.string for n in walk(lhs, Name)]
+            # names: [obj, member, (subscripts...)]
+            if len(names) >= 2:
+                objn, comp = names[0], names[1]
+                base_arr = f"{objn} % {comp}"
+                is_array = bool(list(walk(lhs, Section_Subscript_List)))
+                key = base_arr
+                members.setdefault(key, {"component": comp.lower(), "is_array": is_array, "full": txt_full})
+    if not members:
+        return {}
+    # 生成唯一的临时变量名，并在循环前插入声明与 copy-in
+    pc = list(getattr(parent, "content", []))
+    idx = None
+    for i, n in enumerate(pc):
+        if n is loop_node:
+            idx = i
+            break
+    if idx is None:
+        return {}
+    name_map = {}
+    decl_nodes = []
+    copyin_nodes = []
+    existing_names = set([n.string.lower() for n in walk(parent, Name)])
+    for base_txt, meta in members.items():
+        comp = meta["component"]
+        is_array = meta["is_array"]
+        tmp = f"apf_tmp_{comp}"
+        si = 1
+        while tmp.lower() in existing_names:
+            si += 1
+            tmp = f"apf_tmp_{comp}_{si}"
+        basetype = _infer_component_type(root, comp)
+        if is_array:
+            decl_text = f"{basetype} :: {tmp}(SIZE({base_txt}))"
+            copyin_text = f"{tmp} = {base_txt}"
+        else:
+            decl_text = f"{basetype} :: {tmp}"
+            copyin_text = f"{tmp} = {base_txt}"
+        try:
+            decl_nodes.append(Type_Declaration_Stmt(decl_text))
+            copyin_nodes.append(Assignment_Stmt(copyin_text))
+            name_map[base_txt] = tmp
+        except Exception:
+            # 若构造失败则跳过该成员
+            continue
+    # 在循环之前插入声明和 copy-in
+    for dn in decl_nodes:
+        pc.insert(idx, dn)
+        idx += 1
+    for cn in copyin_nodes:
+        pc.insert(idx, cn)
+        idx += 1
+    # 重写循环体内的赋值语句：将 base_txt 替换为 tmp 名称
+    new_loop_content = []
+    for n in list(getattr(loop_node, "content", [])):
+        if isinstance(n, Assignment_Stmt):
+            txt = str(n)
+            new_txt = txt
+            for base_txt, tmp in name_map.items():
+                # 大小写与空白不敏感替换：替换基数组名或标量名
+                new_txt = new_txt.replace(base_txt, tmp)
+                new_txt = new_txt.replace(base_txt.upper(), tmp)
+                new_txt = new_txt.replace(base_txt.lower(), tmp)
+            if new_txt != txt:
+                try:
+                    n = Assignment_Stmt(new_txt)
+                except Exception:
+                    pass
+        new_loop_content.append(n)
+    loop_node.content = new_loop_content
+    # 对嵌套结构中的赋值语句也进行替换（如 IF 块内）
+    for a in walk(loop_node, Assignment_Stmt):
+        txt = str(a)
+        new_txt = txt
+        for base_txt, tmp in name_map.items():
+            new_txt = new_txt.replace(base_txt, tmp)
+            new_txt = new_txt.replace(base_txt.upper(), tmp)
+            new_txt = new_txt.replace(base_txt.lower(), tmp)
+        if new_txt != txt:
+            try:
+                na = Assignment_Stmt(new_txt)
+                p = getattr(a, "parent", None)
+                pc = list(getattr(p, "content", [])) if p is not None else []
+                for i, node in enumerate(pc):
+                    if node is a:
+                        pc[i] = na
+                        break
+                if p is not None:
+                    p.content = pc
+            except Exception:
+                pass
+    # 在循环之后插入 copy-out
+    copyout_nodes = []
+    for base_txt, tmp in name_map.items():
+        copyout_text = f"{base_txt} = {tmp}"
+        try:
+            copyout_nodes.append(Assignment_Stmt(copyout_text))
+        except Exception:
+            continue
+    # 将 copy-out 插入在循环节点之后
+    ins_at = None
+    for i, n in enumerate(pc):
+        if n is loop_node:
+            ins_at = i + 1
+            break
+    if ins_at is None:
+        parent.content = pc
+        return name_map
+    for cn in copyout_nodes:
+        pc.insert(ins_at, cn)
+        ins_at += 1
+    parent.content = pc
+    return name_map
 
 
 def build_omp_clauses(ar: AnalysisResult) -> str:
