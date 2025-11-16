@@ -345,38 +345,81 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
 def detect_derived_members_in_lines(lines: List[str], sidx: int, eidx: int):
     import re
     res = {}
+    pat_chain = re.compile(r"\b([A-Za-z_]\w*)(?:\s*%\s*[A-Za-z_]\w+)+")
     for i in range(sidx, eidx + 1):
         line = lines[i]
-        # 取 LHS
-        if "=" not in line:
-            continue
-        lhs = line.split("=", 1)[0]
-        if "%" not in lhs:
-            continue
-        # 解析链 obj%comp1%comp2...
-        parts = re.split(r"%", lhs)
-        parts = [p.strip() for p in parts]
-        if len(parts) < 2:
-            continue
-        obj = parts[0].split()[-1]
-        comps_raw = parts[1:]
-        comps = []
-        for c in comps_raw:
-            c = c.strip()
-            c = re.sub(r"\(.*\)$", "", c)
-            c = c.split()[0]
-            if c:
-                comps.append(c)
-        if not comps:
-            continue
-        final = comps[-1].lower()
-        base_sig = obj + " % " + " % ".join(comps)
-        has_paren = bool(re.search(r"\b" + re.escape(comps[-1]) + r"\s*\(", lhs))
-        comp_chain = r"\s*%\s*".join([re.escape(c) for c in comps])
-        patt_all = re.compile(rf"\b{re.escape(obj)}\s*%\s*{comp_chain}\b")
-        patt_arr = re.compile(rf"\b{re.escape(obj)}\s*%\s*{comp_chain}\s*\(")
-        res[base_sig] = {"component": final, "is_array": has_paren, "patt_all": patt_all, "patt_arr": patt_arr}
+        if "=" in line:
+            lhs, rhs = line.split("=", 1)
+        else:
+            lhs, rhs = line, ""
+        # 扫描 LHS 与 RHS 的派生成员链
+        for part_text, is_write in ((lhs, True), (rhs, False)):
+            for m in pat_chain.finditer(part_text):
+                chain_text = m.group(0)
+                parts = [p.strip() for p in chain_text.split('%')]
+                if len(parts) < 2:
+                    continue
+                obj = parts[0].split()[-1]
+                comps = []
+                for c in parts[1:]:
+                    c = re.sub(r"\(.*\)$", "", c).strip()
+                    c = c.split()[0]
+                    if c:
+                        comps.append(c)
+                if not comps:
+                    continue
+                final = comps[-1].lower()
+                base_sig = obj + " % " + " % ".join(comps)
+                # 是否数组：检查链末的组件后是否紧跟括号（在当前片段内）
+                tail_pat = re.compile(rf"\b{re.escape(comps[-1])}\s*\(")
+                has_paren = bool(tail_pat.search(chain_text))
+                comp_chain = r"\s*%\s*".join([re.escape(c) for c in comps])
+                patt_all = re.compile(rf"\b{re.escape(obj)}\s*%\s*{comp_chain}\b")
+                patt_arr = re.compile(rf"\b{re.escape(obj)}\s*%\s*{comp_chain}\s*\(")
+                entry = res.get(base_sig)
+                meta = {"component": final, "is_array": has_paren, "patt_all": patt_all, "patt_arr": patt_arr, "write": is_write}
+                if entry is None:
+                    res[base_sig] = meta
+                else:
+                    # 累积属性：只要有任一写入，则标记 write=True；数组属性若任一出现为数组则为 True
+                    entry["write"] = entry.get("write", False) or is_write
+                    entry["is_array"] = entry.get("is_array", False) or has_paren
+                    res[base_sig] = entry
     return res
+
+
+def sanitize_omp_directives(lines: List[str], nsidx: int, neidx: int) -> List[str]:
+    nsrc = lines
+    def _is_start(s: str) -> bool:
+        t = s.strip().lower()
+        return t.startswith("!$omp parallel do") or t.startswith("!$omp do")
+    def _is_end(s: str) -> bool:
+        t = s.strip().lower()
+        return t.startswith("!$omp end parallel do") or t.startswith("!$omp end do")
+    win_start = max(0, nsidx - 3)
+    win_end = min(len(nsrc) - 1, neidx + 6)
+    start_idxs = [i for i in range(win_start, win_end + 1) if _is_start(nsrc[i])]
+    end_idxs = [i for i in range(win_start, win_end + 1) if _is_end(nsrc[i])]
+    keep = set()
+    # 保留靠近 DO 的唯一开始指令
+    if start_idxs:
+        cand = [i for i in start_idxs if i <= nsidx]
+        target = max(cand) if cand else start_idxs[0]
+        keep.add(target)
+    # 保留紧随 END DO 的唯一结束指令
+    if end_idxs:
+        cand = [i for i in end_idxs if i >= neidx + 1]
+        target = min(cand) if cand else end_idxs[-1]
+        keep.add(target)
+    # 删除窗口内除 keep 外的重复 OMP 指令
+    to_delete = [i for i in (start_idxs + end_idxs) if i not in keep]
+    for i in sorted(to_delete, reverse=True):
+        del nsrc[i]
+        if i <= nsidx:
+            nsidx -= 1
+        if i <= neidx:
+            neidx -= 1
+    return nsrc
 
 
 def build_omp_clauses(ar: AnalysisResult) -> str:

@@ -193,7 +193,8 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
                     if pat_all:
                         line = pat_all.sub(tmp, line)
                     transformed[i] = line
-                copyouts.append(f"{base_txt} = {tmp}\n")
+                if meta.get("write", False):
+                    copyouts.append(f"{base_txt} = {tmp}\n")
                 name_map[base_txt] = tmp
             for k, v in name_map.items():
                 clauses = clauses.replace(k, v)
@@ -219,11 +220,14 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
             continue
         transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth, nth=seen[key])
         nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
+        from .transform import sanitize_omp_directives
+        transformed = sanitize_omp_directives(transformed, nsidx, neidx)
+        nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
         # 插入 copy-out 到 'omp end parallel do' 之后，确保串行写回
         if copyouts:
             # 寻找紧随 END DO 的 'omp end parallel do' 或 'omp end do' 行
             insert_after = None
-            for j in range(neidx + 1, min(len(transformed), neidx + 6)):
+            for j in range(neidx + 1, min(len(transformed), neidx + 8)):
                 if transformed[j].strip().lower().startswith("!$omp end parallel do") or transformed[j].strip().lower().startswith("!$omp end do"):
                     insert_after = j
                     break
