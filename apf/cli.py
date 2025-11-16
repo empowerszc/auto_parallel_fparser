@@ -194,7 +194,7 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
                 break
         if skip:
             continue
-        transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth)
+        transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth, nth=seen[key])
         nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
         if local_collapse and nsidx is not None and neidx is not None:
             protected.append((nsidx, neidx))

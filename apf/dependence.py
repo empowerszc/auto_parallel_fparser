@@ -99,7 +99,8 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
             ir = StatementIR(raw=text)
             lhs = s.items[0]
             if isinstance(lhs, (Part_Ref, Data_Ref)):
-                name = lhs.items[0].string if hasattr(lhs, "items") else str(lhs).split("(")[0]
+                # 使用字符串形式获取完整的引用名（支持 obj%member 和 obj%member(i)）
+                name = str(lhs).split("(")[0]
                 subsec = list(walk(lhs, Section_Subscript_List))
                 subscripts = []
                 affine_map = {}
@@ -134,7 +135,8 @@ def extract_loop_ir(parse_tree) -> List[LoopIR]:
                             resolved_subs.append(subx)
                 ir.writes.append(ArrayAccess(name=name.lower(), subscripts=subscripts, affine_map=affine_map, nonconst_coeffs=nonconst, resolved_subscripts=resolved_subs or subscripts, complex_index=complex_idx))
             for ref in walk(s.items[2], (Part_Ref, Data_Ref)):
-                name = ref.items[0].string if hasattr(ref, "items") else str(ref).split("(")[0]
+                # 统一使用字符串形式提取名称，避免 Data_Ref 仅取到对象名
+                name = str(ref).split("(")[0]
                 subsec = list(walk(ref, Section_Subscript_List))
                 subscripts = []
                 affine_map = {}
@@ -425,18 +427,23 @@ def analyze_loop(loop: LoopIR) -> AnalysisResult:
             arrays.add(a.name)
         for a in s.writes:
             arrays.add(a.name)
-    from fparser.two.Fortran2003 import Assignment_Stmt
+    from fparser.two.Fortran2003 import Assignment_Stmt, Data_Ref
     for node in walk(loop.node_ref, Assignment_Stmt):
         items = getattr(node, "items", [])
         lhs = items[0] if items else None
         rhs = items[2] if len(items) > 2 else None
+        # 收集派生类型成员引用中的名称组件，避免被误判为标量
+        member_components = set()
+        for dr in walk(node, Data_Ref):
+            for n in walk(dr, Name):
+                member_components.add(n.string.lower())
         for n in walk(rhs, Name):
             nm = n.string.lower()
-            if nm not in arrays and nm not in loop.loop_vars:
+            if nm not in arrays and nm not in loop.loop_vars and nm not in member_components:
                 rhs_scalars.add(nm)
         if isinstance(lhs, Name):
             nm = lhs.string.lower()
-            if nm not in arrays and nm not in loop.loop_vars:
+            if nm not in arrays and nm not in loop.loop_vars and nm not in member_components:
                 lhs_scalars.add(nm)
     decl_in = collect_intent_in(loop.node_ref)
     decl_out = collect_intent_out(loop.node_ref)

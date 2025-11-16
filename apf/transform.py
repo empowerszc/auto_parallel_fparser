@@ -20,7 +20,7 @@ class TransformOptions:
         self.collapse = collapse
 
 
-def insert_openmp_directives(src_lines: List[str], loop_start: str, loop_end: str, clauses: str, options: Optional[TransformOptions] = None, nest_depth: int = 1) -> List[str]:
+def insert_openmp_directives(src_lines: List[str], loop_start: str, loop_end: str, clauses: str, options: Optional[TransformOptions] = None, nest_depth: int = 1, nth: Optional[int] = None) -> List[str]:
     """Insert OpenMP directives around a DO loop.
 
     Args:
@@ -39,7 +39,10 @@ def insert_openmp_directives(src_lines: List[str], loop_start: str, loop_end: st
         ['!$omp parallel do private(i)', 'do i=1,2', 'end do', '!$omp end parallel do']
     """
     nsrc = [l.rstrip("\n") for l in src_lines]
-    start_idx, end_idx = find_loop_range(src_lines, loop_start, loop_end)
+    if nth is not None:
+        start_idx, end_idx = find_loop_range_nth(src_lines, loop_start, loop_end, nth)
+    else:
+        start_idx, end_idx = find_loop_range(src_lines, loop_start, loop_end)
     if start_idx is None or end_idx is None:
         return src_lines
     options = options or TransformOptions()
