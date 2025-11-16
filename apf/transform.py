@@ -63,7 +63,7 @@ def insert_openmp_directives(src_lines: List[str], loop_start: str, loop_end: st
             nsrc.insert(start_idx, omp_start)
             end_idx += 1
         if not has_omp_at(end_idx + 1):
-            nsrc.insert(end_idx + 2, omp_end)
+            nsrc.insert(end_idx + 1, omp_end)
     elif options.style == "do":
         omp_start = f"!$omp do{(' ' + clauses) if clauses else ''}{extra_str}"
         omp_end = "!$omp end do"
@@ -71,7 +71,7 @@ def insert_openmp_directives(src_lines: List[str], loop_start: str, loop_end: st
             nsrc.insert(start_idx, omp_start)
             end_idx += 1
         if not has_omp_at(end_idx + 1):
-            nsrc.insert(end_idx + 2, omp_end)
+            nsrc.insert(end_idx + 1, omp_end)
     elif options.style == "parallel_region":
         omp_par_start = "!$omp parallel"
         omp_par_end = "!$omp end parallel"
@@ -340,6 +340,43 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
         ins_at += 1
     parent.content = pc
     return name_map
+
+
+def detect_derived_members_in_lines(lines: List[str], sidx: int, eidx: int):
+    import re
+    res = {}
+    for i in range(sidx, eidx + 1):
+        line = lines[i]
+        # 取 LHS
+        if "=" not in line:
+            continue
+        lhs = line.split("=", 1)[0]
+        if "%" not in lhs:
+            continue
+        # 解析链 obj%comp1%comp2...
+        parts = re.split(r"%", lhs)
+        parts = [p.strip() for p in parts]
+        if len(parts) < 2:
+            continue
+        obj = parts[0].split()[-1]
+        comps_raw = parts[1:]
+        comps = []
+        for c in comps_raw:
+            c = c.strip()
+            c = re.sub(r"\(.*\)$", "", c)
+            c = c.split()[0]
+            if c:
+                comps.append(c)
+        if not comps:
+            continue
+        final = comps[-1].lower()
+        base_sig = obj + " % " + " % ".join(comps)
+        has_paren = bool(re.search(r"\b" + re.escape(comps[-1]) + r"\s*\(", lhs))
+        comp_chain = r"\s*%\s*".join([re.escape(c) for c in comps])
+        patt_all = re.compile(rf"\b{re.escape(obj)}\s*%\s*{comp_chain}\b")
+        patt_arr = re.compile(rf"\b{re.escape(obj)}\s*%\s*{comp_chain}\s*\(")
+        res[base_sig] = {"component": final, "is_array": has_paren, "patt_all": patt_all, "patt_arr": patt_arr}
+    return res
 
 
 def build_omp_clauses(ar: AnalysisResult) -> str:

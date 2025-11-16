@@ -62,7 +62,7 @@ def analyze_file(path: str, no_trivial: bool = False) -> str:
 
 
 def transform_file(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto", analyze_derived: bool = False) -> str:
-    return transform_file_line_fixed(path, output, style=style, schedule=schedule, collapse=collapse)
+    return transform_file_line_fixed(path, output, style=style, schedule=schedule, collapse=collapse, analyze_derived=analyze_derived)
 
 
 def transform_file_ast(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto", analyze_derived: bool = False) -> str:
@@ -144,7 +144,7 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
     return f"Applied OpenMP to {applied} loop(s). Output: {output}"
 
 
-def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto") -> str:
+def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto", analyze_derived: bool = False) -> str:
     tree = parse_file(path, ignore_comments=False)
     loops = extract_loop_ir(tree)
     with open(path, "r") as f:
@@ -159,6 +159,44 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
         if not ar.is_parallel or loop.has_complex_index:
             continue
         clauses = build_omp_clauses(ar)
+        key = loop.start_text
+        seen[key] = seen.get(key, 0) + 1
+        sidx, eidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
+        if sidx is None or eidx is None:
+            continue
+        copyouts = []
+        if analyze_derived:
+            from .transform import detect_derived_members_in_lines, _infer_component_type
+            dmem = detect_derived_members_in_lines(transformed, sidx, eidx)
+            name_map = {}
+            for base_txt, meta in dmem.items():
+                comp = meta["component"]
+                is_array = meta["is_array"]
+                tmp = f"apf_tmp_{comp}"
+                basetype = _infer_component_type(tree, comp)
+                decl = f"{basetype} :: {tmp}"
+                copyin = f"{tmp} = {base_txt}"
+                if is_array:
+                    decl = f"{basetype} :: {tmp}(SIZE({base_txt}))"
+                    copyin = f"{tmp} = {base_txt}"
+                transformed.insert(sidx, decl + "\n")
+                transformed.insert(sidx + 1, copyin + "\n")
+                sidx += 2
+                eidx += 2
+                import re
+                pat_arr = meta.get("patt_arr")
+                pat_all = meta.get("patt_all")
+                for i in range(sidx, eidx + 1):
+                    line = transformed[i]
+                    if pat_arr:
+                        line = pat_arr.sub(f"{tmp}(", line)
+                    if pat_all:
+                        line = pat_all.sub(tmp, line)
+                    transformed[i] = line
+                copyouts.append(f"{base_txt} = {tmp}\n")
+                name_map[base_txt] = tmp
+            for k, v in name_map.items():
+                clauses = clauses.replace(k, v)
         local_style = style
         local_collapse = None
         if collapse == "auto":
@@ -171,11 +209,7 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
             except Exception:
                 local_collapse = None
         opts = TransformOptions(style=local_style, schedule=schedule, collapse=local_collapse)
-        key = loop.start_text
-        seen[key] = seen.get(key, 0) + 1
-        sidx, eidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
-        if sidx is None or eidx is None:
-            continue
+        # sidx/eidx 已在上方计算并随插入更新
         skip = False
         for ps, pe in protected:
             if ps is not None and pe is not None and sidx >= ps and eidx <= pe:
@@ -185,6 +219,19 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
             continue
         transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth, nth=seen[key])
         nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
+        # 插入 copy-out 到 'omp end parallel do' 之后，确保串行写回
+        if copyouts:
+            # 寻找紧随 END DO 的 'omp end parallel do' 或 'omp end do' 行
+            insert_after = None
+            for j in range(neidx + 1, min(len(transformed), neidx + 6)):
+                if transformed[j].strip().lower().startswith("!$omp end parallel do") or transformed[j].strip().lower().startswith("!$omp end do"):
+                    insert_after = j
+                    break
+            if insert_after is None:
+                insert_after = neidx + 1
+            for co in copyouts:
+                insert_after += 1
+                transformed.insert(insert_after, co)
         if local_collapse and nsidx is not None and neidx is not None:
             protected.append((nsidx, neidx))
         applied += 1
@@ -214,7 +261,7 @@ def main():
         print(transform_file_ast(args.input, out, style=args.omp_style, schedule=args.schedule, collapse=args.collapse, analyze_derived=args.analyze_derived))
     if args.apply:
         out = args.output or (args.input + ".omp.f90")
-        print(transform_file_line_fixed(args.input, out, style=args.omp_style, schedule=args.schedule, collapse=args.collapse))
+        print(transform_file_line_fixed(args.input, out, style=args.omp_style, schedule=args.schedule, collapse=args.collapse, analyze_derived=args.analyze_derived))
 
 
 if __name__ == "__main__":
