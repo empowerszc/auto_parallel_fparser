@@ -87,8 +87,6 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
     # 2) 重写派生成员到临时变量（按循环体 LHS 成员）：并在插入 OpenMP 前替换归约名
     for loop in loops:
         ar = analyze_loop(loop)
-        if not ar.is_parallel or loop.has_complex_index:
-            continue
         name_map = {}
         if analyze_derived:
             try:
@@ -99,6 +97,8 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
         clauses = build_omp_clauses(ar)
         for k, v in name_map.items():
             clauses = clauses.replace(k, v)
+        if not ar.is_parallel or loop.has_complex_index:
+            continue
         # 自适应 collapse 策略（同 transform_file_line_fixed）：外层并行且所有内层并行时合并
         local_style = style
         local_collapse = None
@@ -156,8 +156,6 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
     protected = []
     for loop in loops:
         ar = analyze_loop(loop)
-        if not ar.is_parallel or loop.has_complex_index:
-            continue
         clauses = build_omp_clauses(ar)
         key = loop.start_text
         seen[key] = seen.get(key, 0) + 1
@@ -169,20 +167,51 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
             from .transform import detect_derived_members_in_lines, _infer_component_type
             dmem = detect_derived_members_in_lines(transformed, sidx, eidx)
             name_map = {}
+            # 找到所属子程序规范区插入位置：优先在 implicit none 之后，否则在 subroutine/function 头之后
+            sub_start = None
+            for bi in range(sidx, -1, -1):
+                low = transformed[bi].strip().lower()
+                if low.startswith("subroutine") or low.startswith("function"):
+                    sub_start = bi
+                    break
+            sub_end = None
+            for bi in range(eidx, len(transformed)):
+                low = transformed[bi].strip().lower()
+                if low.startswith("end subroutine") or low.startswith("end function"):
+                    sub_end = bi
+                    break
+            decl_insert = (sub_start + 1) if sub_start is not None else sidx
+            for bi in range(sub_start + 1 if sub_start is not None else sidx, min(sub_start + 20 if sub_start is not None else sidx + 20, len(transformed))):
+                low = transformed[bi].strip().lower()
+                if low.startswith("implicit none"):
+                    decl_insert = bi + 1
+            declared = set()
             for base_txt, meta in dmem.items():
                 comp = meta["component"]
                 is_array = meta["is_array"]
                 tmp = f"apf_tmp_{comp}"
                 basetype = _infer_component_type(tree, comp)
-                decl = f"{basetype} :: {tmp}"
+                decl = f"{basetype}, allocatable :: {tmp}(:)" if is_array else f"{basetype} :: {tmp}"
                 copyin = f"{tmp} = {base_txt}"
                 if is_array:
-                    decl = f"{basetype} :: {tmp}(SIZE({base_txt}))"
-                    copyin = f"{tmp} = {base_txt}"
-                transformed.insert(sidx, decl + "\n")
-                transformed.insert(sidx + 1, copyin + "\n")
-                sidx += 2
-                eidx += 2
+                    # 先声明到规范区（去重）
+                    if decl not in declared:
+                        transformed.insert(decl_insert, decl + "\n")
+                        decl_insert += 1
+                        declared.add(decl)
+                    # 在循环前分配与 copy-in
+                    transformed.insert(sidx, f"allocate({tmp}(size({base_txt})))\n")
+                    transformed.insert(sidx + 1, copyin + "\n")
+                    sidx += 2
+                    eidx += 2
+                else:
+                    if decl not in declared:
+                        transformed.insert(decl_insert, decl + "\n")
+                        decl_insert += 1
+                        declared.add(decl)
+                    transformed.insert(sidx, copyin + "\n")
+                    sidx += 1
+                    eidx += 1
                 import re
                 pat_arr = meta.get("patt_arr")
                 pat_all = meta.get("patt_all")
@@ -195,6 +224,8 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
                     transformed[i] = line
                 if meta.get("write", False):
                     copyouts.append(f"{base_txt} = {tmp}\n")
+                    if is_array:
+                        copyouts.append(f"deallocate({tmp})\n")
                 name_map[base_txt] = tmp
             for k, v in name_map.items():
                 clauses = clauses.replace(k, v)
@@ -218,27 +249,35 @@ def transform_file_line_fixed(path: str, output: str, style: str = "parallel_do"
                 break
         if skip:
             continue
-        transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth, nth=seen[key])
-        nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
-        from .transform import sanitize_omp_directives
-        transformed = sanitize_omp_directives(transformed, nsidx, neidx)
-        nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
-        # 插入 copy-out 到 'omp end parallel do' 之后，确保串行写回
-        if copyouts:
-            # 寻找紧随 END DO 的 'omp end parallel do' 或 'omp end do' 行
-            insert_after = None
-            for j in range(neidx + 1, min(len(transformed), neidx + 8)):
-                if transformed[j].strip().lower().startswith("!$omp end parallel do") or transformed[j].strip().lower().startswith("!$omp end do"):
-                    insert_after = j
-                    break
-            if insert_after is None:
-                insert_after = neidx + 1
-            for co in copyouts:
-                insert_after += 1
-                transformed.insert(insert_after, co)
-        if local_collapse and nsidx is not None and neidx is not None:
-            protected.append((nsidx, neidx))
-        applied += 1
+        do_insert = ar.is_parallel and not loop.has_complex_index
+        if do_insert:
+            transformed = insert_openmp_directives(transformed, loop.start_text, loop.end_text, clauses, options=opts, nest_depth=loop.nest_depth, nth=seen[key])
+            nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
+            from .transform import sanitize_omp_directives
+            transformed = sanitize_omp_directives(transformed, nsidx, neidx)
+            nsidx, neidx = find_loop_range_nth(transformed, loop.start_text, loop.end_text, seen[key])
+            # 插入 copy-out 到 'omp end parallel do' 之后，确保串行写回
+            if copyouts:
+                insert_after = None
+                for j in range(neidx + 1, min(len(transformed), neidx + 8)):
+                    if transformed[j].strip().lower().startswith("!$omp end parallel do") or transformed[j].strip().lower().startswith("!$omp end do"):
+                        insert_after = j
+                        break
+                if insert_after is None:
+                    insert_after = neidx + 1
+                for co in copyouts:
+                    insert_after += 1
+                    transformed.insert(insert_after, co)
+            if local_collapse and nsidx is not None and neidx is not None:
+                protected.append((nsidx, neidx))
+            applied += 1
+        else:
+            # 不并行时仍执行成员写回：紧随 END DO 后插入
+            if copyouts:
+                insert_after = eidx + 1
+                for co in copyouts:
+                    transformed.insert(insert_after, co)
+                    insert_after += 1
     with open(output, "w") as f:
         f.writelines(transformed)
     return f"Applied OpenMP to {applied} loop(s). Output: {output}"

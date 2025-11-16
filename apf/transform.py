@@ -1,5 +1,5 @@
 from typing import List, Tuple, Optional
-from fparser.two.Fortran2003 import Comment, Directive, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Assignment_Stmt, Data_Ref, Type_Declaration_Stmt
+from fparser.two.Fortran2003 import Comment, Directive, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Assignment_Stmt, Data_Ref, Type_Declaration_Stmt, Allocate_Stmt, Deallocate_Stmt
 from fparser.common.readfortran import FortranStringReader
 
 from .ir import AnalysisResult
@@ -189,6 +189,7 @@ def _find_parent_with_content(node):
 
 def _infer_component_type(root, comp_name: str) -> str:
     # 尝试从类型定义中推断成员的基本类型（REAL/INTEGER 等），失败则默认 REAL
+    # 说明：遍历 Type_Declaration_Stmt，匹配派生成员名；提取声明前半段作为基本类型
     try:
         from fparser.two.utils import walk
         from fparser.two.Fortran2003 import Type_Declaration_Stmt, Entity_Decl
@@ -212,6 +213,10 @@ def _infer_component_type(root, comp_name: str) -> str:
 
 def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> dict:
     # 识别循环体内赋值语句的派生类型成员（含标量与数组），引入局部临时变量并替换，循环后写回
+    # 策略：
+    # 1) 在循环所属子程序的规范区插入声明（数组声明为 allocatable）与在循环前插入 allocate 与 copy-in
+    # 2) 循环体中将所有派生成员引用替换为临时变量（包含嵌套块内赋值）
+    # 3) 在循环后插入 copy-out；若为数组则追加 deallocate
     from fparser.two.utils import walk
     from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Section_Subscript_List, Name
     parent = _find_parent_with_content(loop_node)
@@ -248,6 +253,7 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
         return {}
     name_map = {}
     decl_nodes = []
+    alloc_nodes = []
     copyin_nodes = []
     existing_names = set([n.string.lower() for n in walk(parent, Name)])
     for base_txt, meta in members.items():
@@ -260,21 +266,28 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
             tmp = f"apf_tmp_{comp}_{si}"
         basetype = _infer_component_type(root, comp)
         if is_array:
-            decl_text = f"{basetype} :: {tmp}(SIZE({base_txt}))"
+            decl_text = f"{basetype}, ALLOCATABLE :: {tmp}(:)"
+            alloc_text = f"ALLOCATE({tmp}(SIZE({base_txt})))"
             copyin_text = f"{tmp} = {base_txt}"
         else:
             decl_text = f"{basetype} :: {tmp}"
+            alloc_text = None
             copyin_text = f"{tmp} = {base_txt}"
         try:
             decl_nodes.append(Type_Declaration_Stmt(decl_text))
+            if alloc_text:
+                alloc_nodes.append(Allocate_Stmt(alloc_text))
             copyin_nodes.append(Assignment_Stmt(copyin_text))
             name_map[base_txt] = tmp
         except Exception:
             # 若构造失败则跳过该成员
             continue
-    # 在循环之前插入声明和 copy-in
+    # 在循环之前插入声明与 allocate/copy-in：保持声明靠近规范区，其余在执行区
     for dn in decl_nodes:
         pc.insert(idx, dn)
+        idx += 1
+    for an in alloc_nodes:
+        pc.insert(idx, an)
         idx += 1
     for cn in copyin_nodes:
         pc.insert(idx, cn)
@@ -297,7 +310,7 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
                     pass
         new_loop_content.append(n)
     loop_node.content = new_loop_content
-    # 对嵌套结构中的赋值语句也进行替换（如 IF 块内）
+    # 对嵌套结构中的赋值语句也进行替换（如 IF 块内），保持一致性
     for a in walk(loop_node, Assignment_Stmt):
         txt = str(a)
         new_txt = txt
@@ -326,6 +339,14 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
             copyout_nodes.append(Assignment_Stmt(copyout_text))
         except Exception:
             continue
+    # 对数组插入 deallocate
+    for base_txt, meta in members.items():
+        tmp = name_map.get(base_txt)
+        if tmp and meta.get("is_array"):
+            try:
+                copyout_nodes.append(Deallocate_Stmt(f"DEALLOCATE({tmp})"))
+            except Exception:
+                pass
     # 将 copy-out 插入在循环节点之后
     ins_at = None
     for i, n in enumerate(pc):
@@ -343,6 +364,7 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
 
 
 def detect_derived_members_in_lines(lines: List[str], sidx: int, eidx: int):
+    # 文本模式下识别 LHS/RHS 的派生成员链（支持嵌套与数组下标），并构造替换所需的模式
     import re
     res = {}
     pat_chain = re.compile(r"\b([A-Za-z_]\w*)(?:\s*%\s*[A-Za-z_]\w+)+")
@@ -389,36 +411,63 @@ def detect_derived_members_in_lines(lines: List[str], sidx: int, eidx: int):
 
 
 def sanitize_omp_directives(lines: List[str], nsidx: int, neidx: int) -> List[str]:
+    # 清理预插或重复的 OpenMP 指令：
+    # - DO 前的连续 OMP 开始指令块，仅保留最靠近 DO 的一条
+    # - END DO 后的连续 OMP 结束指令块，仅保留紧随 END DO 的一条
+    # - 跨越我们插入的临时声明、copy-in/out 语句进行窗口合并
     nsrc = lines
     def _is_start(s: str) -> bool:
         t = s.strip().lower()
-        return t.startswith("!$omp parallel do") or t.startswith("!$omp do")
+        return t.startswith("!$omp parallel do") or t.startswith("!$omp do") or t.startswith("!$omp parallel")
     def _is_end(s: str) -> bool:
         t = s.strip().lower()
-        return t.startswith("!$omp end parallel do") or t.startswith("!$omp end do")
-    win_start = max(0, nsidx - 3)
-    win_end = min(len(nsrc) - 1, neidx + 6)
-    start_idxs = [i for i in range(win_start, win_end + 1) if _is_start(nsrc[i])]
-    end_idxs = [i for i in range(win_start, win_end + 1) if _is_end(nsrc[i])]
-    keep = set()
-    # 保留靠近 DO 的唯一开始指令
-    if start_idxs:
-        cand = [i for i in start_idxs if i <= nsidx]
-        target = max(cand) if cand else start_idxs[0]
-        keep.add(target)
-    # 保留紧随 END DO 的唯一结束指令
-    if end_idxs:
-        cand = [i for i in end_idxs if i >= neidx + 1]
-        target = min(cand) if cand else end_idxs[-1]
-        keep.add(target)
-    # 删除窗口内除 keep 外的重复 OMP 指令
-    to_delete = [i for i in (start_idxs + end_idxs) if i not in keep]
-    for i in sorted(to_delete, reverse=True):
-        del nsrc[i]
-        if i <= nsidx:
-            nsidx -= 1
-        if i <= neidx:
-            neidx -= 1
+        return t.startswith("!$omp end parallel do") or t.startswith("!$omp end do") or t.startswith("!$omp end parallel")
+    # 清理 DO 前的连续 OMP 开始指令块，仅保留最靠近 DO 的一条
+    i = nsidx - 1
+    start_block = []
+    def _is_temp_decl_or_copyin(s: str) -> bool:
+        t = s.strip().upper()
+        return t.startswith("REAL ::") or t.startswith("INTEGER ::") or t.startswith("DOUBLE PRECISION ::") or ("APF_TMP_" in t)
+    # 允许跨越我们插入的临时变量声明/赋值，继续向上合并 OMP 开始指令块
+    while i >= 0:
+        line = nsrc[i]
+        if line.strip().lower().startswith("!$omp"):
+            start_block.append(i)
+            i -= 1
+            continue
+        if _is_temp_decl_or_copyin(line):
+            i -= 1
+            continue
+        break
+    if len(start_block) > 1:
+        keep = min([idx for idx in start_block if _is_start(nsrc[idx])] or [start_block[-1]])
+        for idx in sorted([x for x in start_block if x != keep], reverse=True):
+            del nsrc[idx]
+            if idx <= nsidx:
+                nsidx -= 1
+            if idx <= neidx:
+                neidx -= 1
+    # 清理 END DO 后的连续 OMP 结束指令块，仅保留紧随 END DO 的一条
+    j = neidx + 1
+    end_block = []
+    while j < len(nsrc):
+        line = nsrc[j]
+        if line.strip().lower().startswith("!$omp"):
+            end_block.append(j)
+            j += 1
+            continue
+        if _is_temp_decl_or_copyin(line):
+            j += 1
+            continue
+        break
+    if len(end_block) > 1:
+        keep = min([idx for idx in end_block if _is_end(nsrc[idx])] or [end_block[0]])
+        for idx in sorted([x for x in end_block if x != keep], reverse=True):
+            del nsrc[idx]
+            if idx <= nsidx:
+                nsidx -= 1
+            if idx <= neidx:
+                neidx -= 1
     return nsrc
 
 
