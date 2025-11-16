@@ -83,27 +83,14 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
     for l in loops:
         if l.parent_start_text:
             children.setdefault(l.parent_start_text, []).append(l)
-    # 1) 先处理派生类型原子更新（保持原有逻辑）
+    # 1) 派生类型原子更新：改为 AST 方式插入
     if analyze_derived:
-        from .transform import find_loop_range_nth
-        seen = {}
+        from .transform import insert_atomic_update_for_derived
         for loop in loops:
-            key = loop.start_text
-            seen[key] = seen.get(key, 0) + 1
-            with open(path, "r") as f:
-                lines = f.readlines()
-            sidx, eidx = find_loop_range_nth(lines, loop.start_text, loop.end_text, seen[key])
-            if sidx is None or eidx is None:
-                continue
-            for i in range(sidx, eidx + 1):
-                low = lines[i].lower()
-                if re.search(r"[a-z_]\w*%[a-z_]\w*\s*=\s*[a-z_]\w*%[a-z_]\w*\s*\+", low):
-                    prev = lines[i-1].strip().lower() if i > 0 else ""
-                    if not prev.startswith("!$omp atomic"):
-                        lines.insert(i, "!$omp atomic update\n")
-                        eidx += 1
-                        applied += 1
-                    break
+            try:
+                insert_atomic_update_for_derived(loop.node_ref)
+            except Exception:
+                pass
     # 2) 对可并行循环在 AST 上插入 OpenMP：保持与行级逻辑一致的 collapse/样式选择
     for loop in loops:
         ar = analyze_loop(loop)

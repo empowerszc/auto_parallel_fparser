@@ -164,16 +164,19 @@ def insert_atomic_update_for_derived(loop_node: Block_Nonlabel_Do_Construct):
     content = list(getattr(loop_node, "content", []))
     new_content = []
     for n in content:
-        new_content.append(n)
         if isinstance(n, Assignment_Stmt):
             items = getattr(n, "items", [])
             lhs = items[0] if items else None
             rhs = items[2] if len(items) > 2 else None
             if isinstance(lhs, Data_Ref):
-                txt = str(n).lower()
-                if "+" in txt and str(lhs).lower() in txt:
+                lhs_txt = str(lhs).lower()
+                rhs_txt = str(rhs).lower() if rhs is not None else ""
+                if "+" in rhs_txt and lhs_txt in rhs_txt:
                     r = FortranStringReader("!$omp atomic update\n", ignore_comments=False, process_directives=True)
-                    new_content.insert(len(new_content) - 1, Directive(r))
+                    new_content.append(Directive(r))
+                    new_content.append(n)
+                    continue
+        new_content.append(n)
     loop_node.content = new_content
 
 
