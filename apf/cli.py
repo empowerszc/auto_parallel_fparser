@@ -88,18 +88,23 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
     for loop in loops:
         ar = analyze_loop(loop)
         name_map = {}
+        call_nm = {}
         if analyze_derived:
             try:
                 from .transform import rewrite_derived_members_to_temps, rewrite_calls_with_temps
                 nm1 = rewrite_derived_members_to_temps(loop.node_ref)
-                nm2 = rewrite_calls_with_temps(loop.node_ref)
-                name_map = {**(nm1 or {}), **(nm2 or {})}
+                call_nm = rewrite_calls_with_temps(loop.node_ref)
+                name_map = {**(nm1 or {}), **(call_nm or {})}
             except Exception:
                 name_map = {}
         clauses = build_omp_clauses(ar)
         for k, v in name_map.items():
             clauses = clauses.replace(k, v)
-        if not ar.is_parallel or loop.has_complex_index:
+        allow_insert = (ar.is_parallel and not loop.has_complex_index) or (call_nm and not loop.has_complex_index)
+        if not allow_insert and getattr(ar, 'reason', ''):
+            if 'impure function call' in ar.reason and not loop.has_complex_index:
+                allow_insert = True
+        if not allow_insert:
             continue
         # 自适应 collapse 策略（同 transform_file_line_fixed）：外层并行且所有内层并行时合并
         local_style = style
