@@ -90,8 +90,10 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
         name_map = {}
         if analyze_derived:
             try:
-                from .transform import rewrite_derived_members_to_temps
-                name_map = rewrite_derived_members_to_temps(loop.node_ref)
+                from .transform import rewrite_derived_members_to_temps, rewrite_calls_with_temps
+                nm1 = rewrite_derived_members_to_temps(loop.node_ref)
+                nm2 = rewrite_calls_with_temps(loop.node_ref)
+                name_map = {**(nm1 or {}), **(nm2 or {})}
             except Exception:
                 name_map = {}
         clauses = build_omp_clauses(ar)

@@ -1,5 +1,5 @@
 from typing import List, Tuple, Optional
-from fparser.two.Fortran2003 import Comment, Directive, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Assignment_Stmt, Data_Ref, Type_Declaration_Stmt, Allocate_Stmt, Deallocate_Stmt
+from fparser.two.Fortran2003 import Comment, Directive, Block_Nonlabel_Do_Construct, Nonlabel_Do_Stmt, End_Do_Stmt, Assignment_Stmt, Data_Ref, Type_Declaration_Stmt, Allocate_Stmt, Deallocate_Stmt, Call_Stmt, Subroutine_Subprogram, Function_Subprogram
 from fparser.common.readfortran import FortranStringReader
 
 from .ir import AnalysisResult
@@ -138,9 +138,13 @@ def insert_openmp_directives_ast(loop_node: Block_Nonlabel_Do_Construct, clauses
     if options.style == "parallel_do":
         s = _build_omp_line("parallel_do_start", clauses, options)
         e = _build_omp_line("parallel_do_end", clauses, options)
-        # 在 DO 前插入开始指令，在整个循环节点之后插入结束指令
+        # 结束指令需位于 loop_node 之后、紧随其后的 copy-out/deallocate 之后
+        end_insert = idx + 1
+        from fparser.two.Fortran2003 import Assignment_Stmt
+        while end_insert < len(pc) and isinstance(pc[end_insert], (Assignment_Stmt, Deallocate_Stmt)):
+            end_insert += 1
         pc.insert(idx, _dir(s))
-        pc.insert(idx + 2, _dir(e))
+        pc.insert(end_insert + 1, _dir(e))
     elif options.style == "do":
         s = _build_omp_line("do_start", clauses, options)
         e = _build_omp_line("do_end", clauses, options)
@@ -359,6 +363,224 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
     for cn in copyout_nodes:
         pc.insert(ins_at, cn)
         ins_at += 1
+    parent.content = pc
+    return name_map
+
+
+def _collect_calls_in_loop(loop_node: Block_Nonlabel_Do_Construct):
+    from fparser.two.utils import walk
+    calls = []
+    for c in walk(loop_node, Call_Stmt):
+        try:
+            callee = c.items[0].string
+        except Exception:
+            callee = str(c).split("(")[0].strip()
+        calls.append((c, callee))
+    return calls
+
+
+def _find_subprogram(root, name: str):
+    from fparser.two.utils import walk
+    for s in walk(root, Subroutine_Subprogram):
+        try:
+            sn = s.content[0].items[1].string
+        except Exception:
+            sn = None
+        if sn and sn.lower() == name.lower():
+            return s
+    for f in walk(root, Function_Subprogram):
+        try:
+            fn = f.content[0].items[1].string
+        except Exception:
+            fn = None
+        if fn and fn.lower() == name.lower():
+            return f
+    return None
+
+
+def _detect_derived_in_subprogram(subp):
+    from fparser.two.utils import walk
+    from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Name, Section_Subscript_List
+    chains = {}
+    for dr in walk(subp, (Data_Ref, Part_Ref)):
+        names = [n.string for n in walk(dr, Name)]
+        if len(names) >= 2:
+            objn, comps = names[0], names[1:]
+            chain = objn + " % " + " % ".join(comps)
+            is_array = bool(list(walk(dr, Section_Subscript_List)))
+            chains[chain] = {"component": comps[-1].lower(), "is_array": is_array}
+    return chains
+
+
+def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
+    # 复制子程序，追加形式参数，并将派生成员链替换为传入参数名
+    import re
+    text = subp.tofortran()
+    # 取得名称并构造新名称
+    header = subp.content[0]
+    try:
+        name = header.items[1].string
+    except Exception:
+        name = re.findall(r"\b(subroutine|function)\s+([A-Za-z_]\w+)", text, re.I)[0][1]
+    new_name = name + "_apf"
+    # 形式参数列表：追加参数名
+    add_list = [f"apf_arg_{v}" for v in [meta["component"] for meta in add_args_map.values()]]
+    # 重写头部：在名称与实参之间插入追加参数
+    if "subroutine" in text.lower().splitlines()[0].lower():
+        text = re.sub(rf"(\bsubroutine\s+){re.escape(name)}\s*\((.*?)\)",
+                      lambda m: f"{m.group(1)}{new_name}({m.group(2)}{(',' if m.group(2).strip() else '')}{', '.join(add_list)})",
+                      text, count=1, flags=re.I|re.S)
+    else:
+        text = re.sub(rf"(\bfunction\s+){re.escape(name)}\s*\((.*?)\)",
+                      lambda m: f"{m.group(1)}{new_name}({m.group(2)}{(',' if m.group(2).strip() else '')}{', '.join(add_list)})",
+                      text, count=1, flags=re.I|re.S)
+    # 在规范区追加追加参数的声明（按标量/数组）
+    decls = []
+    for chain, meta in add_args_map.items():
+        comp = meta["component"]
+        argn = f"apf_arg_{comp}"
+        if meta["is_array"]:
+            decls.append(f"REAL, INTENT(INOUT) :: {argn}(:)")
+        else:
+            decls.append(f"REAL, INTENT(INOUT) :: {argn}")
+    spec_insert_done = False
+    def _insert_decls(m):
+        nonlocal spec_insert_done
+        spec_insert_done = True
+        return m.group(0) + "\n" + "\n".join(decls)
+    text = re.sub(r"(?im)^(\s*implicit\s+none\s*)$", _insert_decls, text)
+    if not spec_insert_done:
+        # 若无 implicit none，则在首行之后插入声明
+        lines = text.splitlines()
+        if lines:
+            lines.insert(1, "\n".join(decls))
+            text = "\n".join(lines)
+    # 将派生成员链替换为参数名
+    for chain, meta in add_args_map.items():
+        argn = f"apf_arg_{meta['component']}"
+        # 替换数组与标量两种形式
+        patt_arr = re.compile(re.escape(chain) + r"\s*\(")
+        patt_all = re.compile(re.escape(chain))
+        text = patt_arr.sub(f"{argn}(", text)
+        text = patt_all.sub(argn, text)
+    # 解析并返回新子程序节点，将其插入到根的内容末尾
+    r = FortranStringReader(text, ignore_comments=False, process_directives=True)
+    from fparser.two.Fortran2003 import Subroutine_Subprogram, Function_Subprogram
+    try:
+        new_node = Subroutine_Subprogram(r)
+    except Exception:
+        new_node = Function_Subprogram(r)
+    parent = _find_parent_with_content(subp)
+    pc = list(getattr(parent, "content", []))
+    ins = None
+    for i, n in enumerate(pc):
+        if n is subp:
+            ins = i + 1
+            break
+    if ins is None:
+        pc.append(new_node)
+    else:
+        pc.insert(ins, new_node)
+    parent.content = pc
+    return new_name
+
+
+def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
+    # 在循环体中查找过程调用，若被调用过程内部包含派生成员引用，则：
+    # 1) 在当前子程序规格区声明临时变量（数组 allocatable）并在循环前 copy-in/allocate
+    # 2) 复制被调用过程为 _apf 版本，追加相应的 INOUT 参数并替换内部派生成员引用
+    # 3) 修改调用语句为调用 _apf 版本并传入临时变量；循环后对临时变量进行 copy-out/deallocate
+    root = loop_node
+    while hasattr(root, "parent") and root.parent is not None:
+        root = root.parent
+    calls = _collect_calls_in_loop(loop_node)
+    if not calls:
+        return {}
+    parent = _find_parent_with_content(loop_node)
+    if parent is None:
+        return {}
+    pc = list(getattr(parent, "content", []))
+    # 声明插入位置：implicit none 后，否则头后一行
+    decl_insert = 0
+    for i, n in enumerate(pc[:20]):
+        s = str(n).strip().lower()
+        if s.startswith("implicit none"):
+            decl_insert = i + 1
+            break
+    name_map = {}
+    for call_node, cname in calls:
+        subp = _find_subprogram(root, cname)
+        if not subp:
+            continue
+        chains = _detect_derived_in_subprogram(subp)
+        if not chains:
+            continue
+        # 为每个链在当前过程声明临时变量并在循环前 copy-in/allocate
+        for chain, meta in chains.items():
+            comp = meta["component"]
+            tmp = f"apf_tmp_{comp}"
+            if meta["is_array"]:
+                decl = Type_Declaration_Stmt(f"REAL, ALLOCATABLE :: {tmp}(:)")
+                alloc = Allocate_Stmt(f"ALLOCATE({tmp}(SIZE({chain})))")
+                copyin = Assignment_Stmt(f"{tmp} = {chain}")
+                pc.insert(decl_insert, decl)
+                decl_insert += 1
+                # 在循环之前插入分配与 copy-in
+                idx = None
+                for i, n in enumerate(pc):
+                    if n is loop_node:
+                        idx = i
+                        break
+                if idx is not None:
+                    pc.insert(idx, alloc)
+                    pc.insert(idx + 1, copyin)
+            else:
+                decl = Type_Declaration_Stmt(f"REAL :: {tmp}")
+                copyin = Assignment_Stmt(f"{tmp} = {chain}")
+                pc.insert(decl_insert, decl)
+                decl_insert += 1
+                idx = None
+                for i, n in enumerate(pc):
+                    if n is loop_node:
+                        idx = i
+                        break
+                if idx is not None:
+                    pc.insert(idx, copyin)
+            name_map[chain] = tmp
+        # 复制被调用过程，替换内部派生成员引用，追加参数
+        new_name = _duplicate_subprogram_with_args(root, subp, chains)
+        # 替换调用语句名称并在实参列表后追加临时变量
+        ctxt = str(call_node)
+        # 构造追加参数文本
+        add_args = [name_map.get(chain, f"apf_tmp_{meta['component']}") for chain, meta in chains.items()]
+        import re
+        if "(" in ctxt:
+            ctxt = re.sub(rf"\b{re.escape(cname)}\s*\((.*?)\)", lambda m: f"{new_name}({m.group(1)}{(',' if m.group(1).strip() else '')}{', '.join(add_args)})", ctxt, count=1)
+        else:
+            ctxt = re.sub(rf"\b{re.escape(cname)}\b", f"{new_name}({', '.join(add_args)})", ctxt, count=1)
+        try:
+            new_call = Call_Stmt(FortranStringReader(ctxt, ignore_comments=False, process_directives=True))
+            # 替换父 content 中的节点
+            for i, n in enumerate(pc):
+                if n is call_node:
+                    pc[i] = new_call
+                    break
+        except Exception:
+            pass
+        # 循环后写回与释放
+        idx_end = None
+        for i, n in enumerate(pc):
+            if n is loop_node:
+                idx_end = i + 1
+                break
+        if idx_end is not None:
+            for chain, meta in chains.items():
+                tmp = name_map.get(chain, f"apf_tmp_{meta['component']}")
+                pc.insert(idx_end, Assignment_Stmt(f"{chain} = {tmp}"))
+                idx_end += 1
+                if meta["is_array"]:
+                    pc.insert(idx_end, Deallocate_Stmt(f"DEALLOCATE({tmp})"))
+                    idx_end += 1
     parent.content = pc
     return name_map
 
