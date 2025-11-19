@@ -91,9 +91,9 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
         call_nm = {}
         if analyze_derived:
             try:
-                from .transform import rewrite_derived_members_to_temps, rewrite_calls_with_temps
+                from .transform import rewrite_derived_members_to_temps
                 nm1 = rewrite_derived_members_to_temps(loop.node_ref)
-                call_nm = rewrite_calls_with_temps(loop.node_ref)
+                call_nm = {}
                 name_map = {**(nm1 or {}), **(call_nm or {})}
             except Exception:
                 name_map = {}

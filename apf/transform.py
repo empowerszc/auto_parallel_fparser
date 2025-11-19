@@ -191,12 +191,30 @@ def _find_parent_with_content(node):
     return p
 
 
+def _find_enclosing_subprogram(node):
+    q = getattr(node, "parent", None)
+    from fparser.two.Fortran2003 import Subroutine_Subprogram, Function_Subprogram
+    while q is not None and not isinstance(q, (Subroutine_Subprogram, Function_Subprogram)):
+        q = getattr(q, "parent", None)
+    return q
+
+
+def _find_spec_part(subp):
+    if subp is None:
+        return None
+    from fparser.two.Fortran2003 import Specification_Part
+    for n in list(getattr(subp, "content", [])):
+        if isinstance(n, Specification_Part):
+            return n
+    return None
+
+
 def _infer_component_type(root, comp_name: str) -> str:
     # 尝试从类型定义中推断成员的基本类型（REAL/INTEGER 等），失败则默认 REAL
-    # 说明：遍历 Type_Declaration_Stmt，匹配派生成员名；提取声明前半段作为基本类型
+    # 说明：优先遍历 Type_Declaration_Stmt，其次解析 Derived_Type_Def 文本以获取组件声明头
     try:
         from fparser.two.utils import walk
-        from fparser.two.Fortran2003 import Type_Declaration_Stmt, Entity_Decl
+        from fparser.two.Fortran2003 import Type_Declaration_Stmt, Entity_Decl, Derived_Type_Def
         for td in walk(root, Type_Declaration_Stmt):
             txt = str(td).strip().upper()
             for e in walk(td, Entity_Decl):
@@ -205,11 +223,19 @@ def _infer_component_type(root, comp_name: str) -> str:
                 except Exception:
                     nm = None
                 if nm == comp_name.lower():
-                    # 形如 "REAL, ALLOCATABLE :: data_arr(:)" 提取前半部分基本类型
                     base = txt.split("::")[0].strip()
-                    # 移除属性，仅保留基本类型名
                     base = base.split(",")[0].strip()
                     return base.capitalize()
+        for dt in walk(root, Derived_Type_Def):
+            dtxt = dt.tofortran() if hasattr(dt, "tofortran") else str(dt)
+            lines = [l.strip() for l in dtxt.splitlines()]
+            for l in lines:
+                if "::" in l and comp_name.lower() in l.lower():
+                    head = l.split("::")[0].strip()
+                    head_u = head.upper()
+                    for kw in ["REAL", "INTEGER", "DOUBLE PRECISION", "LOGICAL", "COMPLEX"]:
+                        if head_u.startswith(kw):
+                            return kw.title() if kw != "DOUBLE PRECISION" else "Double Precision"
     except Exception:
         pass
     return "REAL"
@@ -248,12 +274,24 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
         return {}
     # 生成唯一的临时变量名，并在循环前插入声明与 copy-in
     pc = list(getattr(parent, "content", []))
-    idx = None
+    subp = _find_enclosing_subprogram(loop_node)
+    spec = _find_spec_part(subp)
+    spc = list(getattr(spec, "content", [])) if spec is not None else None
+    # 规范区插入位置：implicit none 之后；若没有则在规范区开头
+    decl_insert = 0
+    if spc is not None:
+        for i, n in enumerate(spc[:30]):
+            s = str(n).strip().lower()
+            if s.startswith("implicit none"):
+                decl_insert = i + 1
+                break
+    # 循环在执行区中的位置
+    idx_loop = None
     for i, n in enumerate(pc):
         if n is loop_node:
-            idx = i
+            idx_loop = i
             break
-    if idx is None:
+    if idx_loop is None:
         return {}
     name_map = {}
     decl_nodes = []
@@ -286,16 +324,24 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
         except Exception:
             # 若构造失败则跳过该成员
             continue
-    # 在循环之前插入声明与 allocate/copy-in：保持声明靠近规范区，其余在执行区
-    for dn in decl_nodes:
-        pc.insert(idx, dn)
-        idx += 1
+    # 插入声明到规范区
+    if spc is not None:
+        for dn in decl_nodes:
+            spc.insert(decl_insert, dn)
+            decl_insert += 1
+        spec.content = spc
+    else:
+        # 回退：若未找到规范区，则插入到当前父 content 的顶部
+        for dn in decl_nodes:
+            pc.insert(0, dn)
+    # 在循环之前插入 allocate/copy-in（执行区）
+    exec_insert = idx_loop
     for an in alloc_nodes:
-        pc.insert(idx, an)
-        idx += 1
+        pc.insert(exec_insert, an)
+        exec_insert += 1
     for cn in copyin_nodes:
-        pc.insert(idx, cn)
-        idx += 1
+        pc.insert(exec_insert, cn)
+        exec_insert += 1
     # 重写循环体内的赋值语句：将 base_txt 替换为 tmp 名称
     new_loop_content = []
     for n in list(getattr(loop_node, "content", [])):
@@ -400,14 +446,19 @@ def _find_subprogram(root, name: str):
 
 def _detect_derived_in_subprogram(subp):
     from fparser.two.utils import walk
-    from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Name, Section_Subscript_List
+    from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Section_Subscript_List
+    import re
     chains = {}
     for dr in walk(subp, (Data_Ref, Part_Ref)):
-        names = [n.string for n in walk(dr, Name)]
-        if len(names) >= 2:
-            objn, comps = names[0], names[1:]
+        txt = str(dr).strip()
+        # 去除数组下标，保留派生成员链
+        chain_txt = re.sub(r"\([^()]*\)", "", txt)
+        parts = [p.strip() for p in chain_txt.split('%')]
+        if len(parts) >= 2:
+            objn = parts[0]
+            comps = parts[1:]
             chain = objn + " % " + " % ".join(comps)
-            is_array = bool(list(walk(dr, Section_Subscript_List)))
+            is_array = '(' in txt
             chains[chain] = {"component": comps[-1].lower(), "is_array": is_array}
     return chains
 
@@ -423,8 +474,13 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
     except Exception:
         name = re.findall(r"\b(subroutine|function)\s+([A-Za-z_]\w+)", text, re.I)[0][1]
     new_name = name + "_apf"
-    # 形式参数列表：追加参数名
-    add_list = [f"apf_arg_{v}" for v in [meta["component"] for meta in add_args_map.values()]]
+    # 形式参数列表：追加参数名（按组件去重）
+    comps = []
+    for meta in add_args_map.values():
+        c = meta["component"]
+        if c not in comps:
+            comps.append(c)
+    add_list = [f"apf_arg_{v}" for v in comps]
     # 重写头部：在名称与实参之间插入追加参数
     if "subroutine" in text.lower().splitlines()[0].lower():
         text = re.sub(rf"(\bsubroutine\s+){re.escape(name)}\s*\((.*?)\)",
@@ -436,13 +492,17 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
                       text, count=1, flags=re.I|re.S)
     # 在规范区追加追加参数的声明（按标量/数组）
     decls = []
-    for chain, meta in add_args_map.items():
-        comp = meta["component"]
+    # 声明追加参数类型，基于组件的基本类型
+    from fparser.two.Fortran2003 import Type_Declaration_Stmt
+    for comp in comps:
         argn = f"apf_arg_{comp}"
-        if meta["is_array"]:
-            decls.append(f"REAL, INTENT(INOUT) :: {argn}(:)")
+        basetype = _infer_component_type(root, comp)
+        # 数组/标量需参考 add_args_map 中任何一个该组件的 is_array 标记
+        is_arr = any((meta.get("component") == comp and meta.get("is_array")) for meta in add_args_map.values())
+        if is_arr:
+            decls.append(f"{basetype}, INTENT(INOUT) :: {argn}(:)")
         else:
-            decls.append(f"REAL, INTENT(INOUT) :: {argn}")
+            decls.append(f"{basetype}, INTENT(INOUT) :: {argn}")
     spec_insert_done = False
     def _insert_decls(m):
         nonlocal spec_insert_done
@@ -500,13 +560,17 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
     if parent is None:
         return {}
     pc = list(getattr(parent, "content", []))
-    # 声明插入位置：implicit none 后，否则头后一行
+    # 在规范区插入声明
+    subp = _find_enclosing_subprogram(loop_node)
+    spec = _find_spec_part(subp)
+    spc = list(getattr(spec, "content", [])) if spec is not None else None
     decl_insert = 0
-    for i, n in enumerate(pc[:20]):
-        s = str(n).strip().lower()
-        if s.startswith("implicit none"):
-            decl_insert = i + 1
-            break
+    if spc is not None:
+        for i, n in enumerate(spc[:30]):
+            s = str(n).strip().lower()
+            if s.startswith("implicit none"):
+                decl_insert = i + 1
+                break
     name_map = {}
     for call_node, cname in calls:
         subp = _find_subprogram(root, cname)
@@ -519,12 +583,18 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
         for chain, meta in chains.items():
             comp = meta["component"]
             tmp = f"apf_tmp_{comp}"
+            # 推断成员基本类型
+            basetype = _infer_component_type(root, comp)
             if meta["is_array"]:
-                decl = Type_Declaration_Stmt(f"REAL, ALLOCATABLE :: {tmp}(:)")
+                decl = Type_Declaration_Stmt(f"{basetype}, ALLOCATABLE :: {tmp}(:)")
                 alloc = Allocate_Stmt(f"ALLOCATE({tmp}(SIZE({chain})))")
                 copyin = Assignment_Stmt(f"{tmp} = {chain}")
-                pc.insert(decl_insert, decl)
-                decl_insert += 1
+                if spc is not None:
+                    spc.insert(decl_insert, decl)
+                    decl_insert += 1
+                    spec.content = spc
+                else:
+                    pc.insert(0, decl)
                 # 在循环之前插入分配与 copy-in
                 idx = None
                 for i, n in enumerate(pc):
@@ -535,10 +605,14 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                     pc.insert(idx, alloc)
                     pc.insert(idx + 1, copyin)
             else:
-                decl = Type_Declaration_Stmt(f"REAL :: {tmp}")
+                decl = Type_Declaration_Stmt(f"{basetype} :: {tmp}")
                 copyin = Assignment_Stmt(f"{tmp} = {chain}")
-                pc.insert(decl_insert, decl)
-                decl_insert += 1
+                if spc is not None:
+                    spc.insert(decl_insert, decl)
+                    decl_insert += 1
+                    spec.content = spc
+                else:
+                    pc.insert(0, decl)
                 idx = None
                 for i, n in enumerate(pc):
                     if n is loop_node:
