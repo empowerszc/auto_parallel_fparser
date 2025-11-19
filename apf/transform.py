@@ -210,6 +210,7 @@ def _find_spec_part(subp):
 
 
 def _unique_name(base: str, existing: set) -> str:
+    # 生成不与现有 Name 冲突的唯一名称（追加 _2/_3 后缀）
     n = base
     i = 2
     while n.lower() in existing:
@@ -454,6 +455,7 @@ def _find_subprogram(root, name: str):
 
 
 def _detect_derived_writes_in_subprogram(subp):
+    # 仅收集赋值语句左值的派生成员链（含数组形态），避免误识别下标名
     from fparser.two.utils import walk
     from fparser.two.Fortran2003 import Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List
     import re
@@ -549,6 +551,7 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
 
 
 def _replace_lhs_with_args_in_subprogram(subp_node, arg_map: dict, add_args_map: dict):
+    # 在复制过程 AST 中仅替换赋值左值为追加参数名，保留原下标
     from fparser.two.utils import walk
     from fparser.two.Fortran2003 import Assignment_Stmt
     import re
