@@ -1,39 +1,62 @@
-module m_calls
+module m_calls_update
   implicit none
-  type :: T1
-    real :: sum_val
-    real, allocatable :: a(:)
-  end type T1
+  type :: TInner
+    real :: s
+    real, allocatable :: arr(:)
+  end type TInner
+  type :: TObj
+    type(TInner) :: in
+    real :: t
+  end type TObj
 contains
-  subroutine update_obj(obj, i)
+  subroutine upd1(obj, i, alpha)
     implicit none
-    type(T1), intent(inout) :: obj
+    type(TObj), intent(inout) :: obj
     integer, intent(in) :: i
-    if (mod(i,2) == 0) then
-      obj%sum_val = obj%sum_val + 2.0
+    real, intent(in) :: alpha
+    if (obj%in%s > 0.0) then
+      obj%in%s = obj%in%s + alpha
     else
-      obj%sum_val = obj%sum_val + 1.0
+      obj%in%s = obj%in%s - alpha
     end if
-    if (obj%sum_val > 10.0) then
-      obj%a(i) = obj%a(i) + real(i)
-    else
-      obj%a(i) = obj%a(i) + 0.5*real(i)
+    if (allocated(obj%in%arr)) then
+      if (mod(i,2) == 0) then
+        obj%in%arr(i) = obj%in%arr(i) + alpha*real(i)
+      else
+        obj%in%arr(i) = obj%in%arr(i) - alpha*real(i)
+      end if
     end if
-  end subroutine update_obj
+    obj%t = obj%t + 1.0
+  end subroutine upd1
 
-  subroutine do_work(n)
+  subroutine upd2(obj, i, beta)
+    implicit none
+    type(TObj), intent(inout) :: obj
+    integer, intent(in) :: i
+    real, intent(in) :: beta
+    if (beta > 1.0) then
+      obj%in%s = obj%in%s + beta
+    end if
+    if (allocated(obj%in%arr)) then
+      obj%in%arr(i) = obj%in%arr(i) + beta
+    end if
+    obj%t = obj%t + beta
+  end subroutine upd2
+
+  subroutine driver(n)
     implicit none
     integer, intent(in) :: n
-    type(T1) :: obj
+    type(TObj) :: x
     integer :: i
-    allocate(obj%a(n))
-    obj%sum_val = 0.0
+    allocate(x%in%arr(n))
+    x%in%s = 0.0
+    x%t = 0.0
     do i = 1, n
-      if (i <= n/2) then
-        call update_obj(obj, i)
+      if (i < n/2) then
+        call upd1(x, i, 0.5)
       else
-        call update_obj(obj, i)
+        call upd2(x, i, 1.5)
       end if
     end do
-  end subroutine do_work
-end module m_calls
+  end subroutine driver
+end module m_calls_update
