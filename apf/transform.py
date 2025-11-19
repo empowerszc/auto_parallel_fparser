@@ -444,22 +444,27 @@ def _find_subprogram(root, name: str):
     return None
 
 
-def _detect_derived_in_subprogram(subp):
+def _detect_derived_writes_in_subprogram(subp):
     from fparser.two.utils import walk
-    from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Section_Subscript_List
+    from fparser.two.Fortran2003 import Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List
     import re
     chains = {}
-    for dr in walk(subp, (Data_Ref, Part_Ref)):
-        txt = str(dr).strip()
-        # 去除数组下标，保留派生成员链
-        chain_txt = re.sub(r"\([^()]*\)", "", txt)
-        parts = [p.strip() for p in chain_txt.split('%')]
-        if len(parts) >= 2:
-            objn = parts[0]
-            comps = parts[1:]
-            chain = objn + " % " + " % ".join(comps)
-            is_array = '(' in txt
-            chains[chain] = {"component": comps[-1].lower(), "is_array": is_array}
+    for a in walk(subp, Assignment_Stmt):
+        items = getattr(a, "items", [])
+        lhs = items[0] if items else None
+        if isinstance(lhs, (Data_Ref, Part_Ref)):
+            txt = str(lhs).strip()
+            # 去除数组下标，保留派生成员链
+            chain_txt = re.sub(r"\([^()]*\)", "", txt)
+            if '%' not in chain_txt:
+                continue
+            parts = [p.strip() for p in chain_txt.split('%')]
+            if len(parts) >= 2:
+                objn = parts[0]
+                comps = parts[1:]
+                chain = objn + " % " + " % ".join(comps)
+                is_array = bool(list(walk(lhs, Section_Subscript_List)))
+                chains[chain] = {"component": comps[-1].lower(), "is_array": is_array}
     return chains
 
 
@@ -515,14 +520,14 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         if lines:
             lines.insert(1, "\n".join(decls))
             text = "\n".join(lines)
-    # 将派生成员链替换为参数名
+    # 仅替换 LHS 写入中的派生成员链为参数名
     for chain, meta in add_args_map.items():
         argn = f"apf_arg_{meta['component']}"
-        # 替换数组与标量两种形式
-        patt_arr = re.compile(re.escape(chain) + r"\s*\(")
-        patt_all = re.compile(re.escape(chain))
-        text = patt_arr.sub(f"{argn}(", text)
-        text = patt_all.sub(argn, text)
+        # 匹配形如 '... chain(...) = ' 或 '... chain = '
+        lhs_pat = re.compile(rf"(?m)^(\s*)({re.escape(chain)}\s*(\([^)]*\))?)\s*=\s*", re.I)
+        def _repl(m):
+            return f"{m.group(1)}{argn}{'' if meta.get('is_array') is False else m.group(3) if m.group(3) else ''} = "
+        text = lhs_pat.sub(_repl, text)
     # 解析并返回新子程序节点，将其插入到根的内容末尾
     r = FortranStringReader(text, ignore_comments=False, process_directives=True)
     from fparser.two.Fortran2003 import Subroutine_Subprogram, Function_Subprogram
@@ -576,7 +581,7 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
         subp = _find_subprogram(root, cname)
         if not subp:
             continue
-        chains = _detect_derived_in_subprogram(subp)
+        chains = _detect_derived_writes_in_subprogram(subp)
         if not chains:
             continue
         # 为每个链在当前过程声明临时变量并在循环前 copy-in/allocate
