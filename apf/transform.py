@@ -209,6 +209,15 @@ def _find_spec_part(subp):
     return None
 
 
+def _unique_name(base: str, existing: set) -> str:
+    n = base
+    i = 2
+    while n.lower() in existing:
+        n = f"{base}_{i}"
+        i += 1
+    return n
+
+
 def _infer_component_type(root, comp_name: str) -> str:
     # 尝试从类型定义中推断成员的基本类型（REAL/INTEGER 等），失败则默认 REAL
     # 说明：优先遍历 Type_Declaration_Stmt，其次解析 Derived_Type_Def 文本以获取组件声明头
@@ -479,12 +488,13 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
     except Exception:
         name = re.findall(r"\b(subroutine|function)\s+([A-Za-z_]\w+)", text, re.I)[0][1]
     new_name = name + "_apf"
-    # 形式参数列表：追加参数名（按组件去重）
+    # 形式参数列表：追加参数名（按组件去重，确保唯一）
     comps = []
     for meta in add_args_map.values():
         c = meta["component"]
         if c not in comps:
             comps.append(c)
+    # 先构造占位名，稍后在 AST 中保证唯一
     add_list = [f"apf_arg_{v}" for v in comps]
     # 重写头部：在名称与实参之间插入追加参数
     if "subroutine" in text.lower().splitlines()[0].lower():
@@ -497,37 +507,6 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
                       text, count=1, flags=re.I|re.S)
     # 在规范区追加追加参数的声明（按标量/数组）
     decls = []
-    # 声明追加参数类型，基于组件的基本类型
-    from fparser.two.Fortran2003 import Type_Declaration_Stmt
-    for comp in comps:
-        argn = f"apf_arg_{comp}"
-        basetype = _infer_component_type(root, comp)
-        # 数组/标量需参考 add_args_map 中任何一个该组件的 is_array 标记
-        is_arr = any((meta.get("component") == comp and meta.get("is_array")) for meta in add_args_map.values())
-        if is_arr:
-            decls.append(f"{basetype}, INTENT(INOUT) :: {argn}(:)")
-        else:
-            decls.append(f"{basetype}, INTENT(INOUT) :: {argn}")
-    spec_insert_done = False
-    def _insert_decls(m):
-        nonlocal spec_insert_done
-        spec_insert_done = True
-        return m.group(0) + "\n" + "\n".join(decls)
-    text = re.sub(r"(?im)^(\s*implicit\s+none\s*)$", _insert_decls, text)
-    if not spec_insert_done:
-        # 若无 implicit none，则在首行之后插入声明
-        lines = text.splitlines()
-        if lines:
-            lines.insert(1, "\n".join(decls))
-            text = "\n".join(lines)
-    # 仅替换 LHS 写入中的派生成员链为参数名
-    for chain, meta in add_args_map.items():
-        argn = f"apf_arg_{meta['component']}"
-        # 匹配形如 '... chain(...) = ' 或 '... chain = '
-        lhs_pat = re.compile(rf"(?m)^(\s*)({re.escape(chain)}\s*(\([^)]*\))?)\s*=\s*", re.I)
-        def _repl(m):
-            return f"{m.group(1)}{argn}{'' if meta.get('is_array') is False else m.group(3) if m.group(3) else ''} = "
-        text = lhs_pat.sub(_repl, text)
     # 解析并返回新子程序节点，将其插入到根的内容末尾
     r = FortranStringReader(text, ignore_comments=False, process_directives=True)
     from fparser.two.Fortran2003 import Subroutine_Subprogram, Function_Subprogram
@@ -535,6 +514,25 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         new_node = Subroutine_Subprogram(r)
     except Exception:
         new_node = Function_Subprogram(r)
+    # 在新子程序的规范区插入追加参数声明，确保名称唯一
+    spec = _find_spec_part(new_node)
+    spc = list(getattr(spec, "content", [])) if spec is not None else []
+    from fparser.two.utils import walk
+    existing_names = set([n.string.lower() for n in walk(new_node, Name)])
+    arg_map = {}
+    for comp in comps:
+        base = f"apf_arg_{comp}"
+        argn = _unique_name(base, existing_names)
+        existing_names.add(argn.lower())
+        arg_map[comp] = argn
+        basetype = _infer_component_type(root, comp)
+        is_arr = any((meta.get("component") == comp and meta.get("is_array")) for meta in add_args_map.values())
+        decl_text = f"{basetype}, INTENT(INOUT) :: {argn}(:)" if is_arr else f"{basetype}, INTENT(INOUT) :: {argn}"
+        spc.append(Type_Declaration_Stmt(decl_text))
+    if spec is not None:
+        spec.content = spc
+    # 使用 AST 级替换：仅替换 LHS 写入链为参数名
+    _replace_lhs_with_args_in_subprogram(new_node, arg_map, add_args_map)
     parent = _find_parent_with_content(subp)
     pc = list(getattr(parent, "content", []))
     ins = None
@@ -548,6 +546,40 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         pc.insert(ins, new_node)
     parent.content = pc
     return new_name
+
+
+def _replace_lhs_with_args_in_subprogram(subp_node, arg_map: dict, add_args_map: dict):
+    from fparser.two.utils import walk
+    from fparser.two.Fortran2003 import Assignment_Stmt
+    import re
+    chains = list(add_args_map.items())
+    for a in walk(subp_node, Assignment_Stmt):
+        txt = str(a)
+        new_txt = txt
+        for chain, meta in chains:
+            comp = meta.get("component")
+            argn = arg_map.get(comp)
+            if not argn:
+                continue
+            lhs_pat = re.compile(rf"^(\s*)({re.escape(chain)}\s*(\([^)]*\))?)\s*=\s*", re.I)
+            m = lhs_pat.match(new_txt)
+            if m:
+                # 保留原左值下标（若有）
+                idx = m.group(3) or ""
+                new_txt = lhs_pat.sub(f"\\g<1>{argn}{idx} = ", new_txt, count=1)
+        if new_txt != txt:
+            try:
+                na = Assignment_Stmt(new_txt)
+                p = getattr(a, "parent", None)
+                pc = list(getattr(p, "content", [])) if p is not None else []
+                for i, node in enumerate(pc):
+                    if node is a:
+                        pc[i] = na
+                        break
+                if p is not None:
+                    p.content = pc
+            except Exception:
+                pass
 
 
 def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
@@ -577,6 +609,8 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                 decl_insert = i + 1
                 break
     name_map = {}
+    from fparser.two.utils import walk
+    existing_names_parent = set([n.string.lower() for n in walk(parent, Name)])
     for call_node, cname in calls:
         subp = _find_subprogram(root, cname)
         if not subp:
@@ -587,7 +621,9 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
         # 为每个链在当前过程声明临时变量并在循环前 copy-in/allocate
         for chain, meta in chains.items():
             comp = meta["component"]
-            tmp = f"apf_tmp_{comp}"
+            base_tmp = f"apf_tmp_{comp}"
+            tmp = _unique_name(base_tmp, existing_names_parent)
+            existing_names_parent.add(tmp.lower())
             # 推断成员基本类型
             basetype = _infer_component_type(root, comp)
             if meta["is_array"]:

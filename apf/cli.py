@@ -65,7 +65,7 @@ def transform_file(path: str, output: str, style: str = "parallel_do", schedule:
     return transform_file_line_fixed(path, output, style=style, schedule=schedule, collapse=collapse, analyze_derived=analyze_derived)
 
 
-def transform_file_ast(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto", analyze_derived: bool = False) -> str:
+def transform_file_ast(path: str, output: str, style: str = "parallel_do", schedule: str = "static", collapse: str = "auto", analyze_derived: bool = False, rewrite_calls: bool = False) -> str:
     """基于 AST 的 OpenMP 指令插入与写回。
 
     流程概览：
@@ -91,9 +91,9 @@ def transform_file_ast(path: str, output: str, style: str = "parallel_do", sched
         call_nm = {}
         if analyze_derived:
             try:
-                from .transform import rewrite_derived_members_to_temps
+                from .transform import rewrite_derived_members_to_temps, rewrite_calls_with_temps
                 nm1 = rewrite_derived_members_to_temps(loop.node_ref)
-                call_nm = {}
+                call_nm = rewrite_calls_with_temps(loop.node_ref) if rewrite_calls else {}
                 name_map = {**(nm1 or {}), **(call_nm or {})}
             except Exception:
                 name_map = {}
@@ -299,6 +299,7 @@ def main():
     p.add_argument("--analyze-derived", action="store_true", help="enable derived-type member analysis and transforms")
     p.add_argument("--apply", action="store_true", help="apply OpenMP transformation")
     p.add_argument("--apply-ast", action="store_true", help="apply OpenMP transformation via AST editing (experimental)")
+    p.add_argument("--rewrite-calls", action="store_true", help="enable rewriting calls to *_apf with temp args (dev)")
     p.add_argument("--output", default=None, help="output file when applying transformation")
     p.add_argument("--omp-style", choices=["parallel_do", "do", "parallel_region"], default="parallel_do")
     p.add_argument("--schedule", default="static")
@@ -308,7 +309,7 @@ def main():
         print(analyze_file(args.input, no_trivial=args.no_trivial))
     if args.apply_ast:
         out = args.output or (args.input + ".omp_ast.f90")
-        print(transform_file_ast(args.input, out, style=args.omp_style, schedule=args.schedule, collapse=args.collapse, analyze_derived=args.analyze_derived))
+        print(transform_file_ast(args.input, out, style=args.omp_style, schedule=args.schedule, collapse=args.collapse, analyze_derived=args.analyze_derived, rewrite_calls=args.rewrite_calls))
     if args.apply:
         out = args.output or (args.input + ".omp.f90")
         print(transform_file_line_fixed(args.input, out, style=args.omp_style, schedule=args.schedule, collapse=args.collapse, analyze_derived=args.analyze_derived))
