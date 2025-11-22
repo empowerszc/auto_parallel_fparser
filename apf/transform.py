@@ -190,6 +190,17 @@ def _find_parent_with_content(node):
         p = getattr(p, "parent", None)
     return p
 
+def _find_container_with(node):
+    q = getattr(node, "parent", None)
+    while q is not None:
+        if hasattr(q, "content"):
+            pc = list(getattr(q, "content", []))
+            for i, n in enumerate(pc):
+                if n is node:
+                    return q, i
+        q = getattr(q, "parent", None)
+    return None, None
+
 
 def _find_enclosing_subprogram(node):
     q = getattr(node, "parent", None)
@@ -265,21 +276,41 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
     root = parent
     while hasattr(root, "parent") and root.parent is not None:
         root = root.parent
-    # 收集要处理的成员：仅针对作为 LHS 的派生成员（需要写回）
+    # 跳过包含复杂分支结构的循环，避免破坏 DO 语义序列化
+    try:
+        from fparser.two.Fortran2003 import Select_Case_Construct, If_Construct
+        from fparser.two.utils import walk as _walk
+        has_complex = bool(list(_walk(loop_node, Select_Case_Construct))) or bool(list(_walk(loop_node, If_Construct)))
+        if has_complex:
+            return {}
+    except Exception:
+        pass
+    # 若所属子程序内部不包含过程调用，则跳过（避免在纯计算过程内破坏 DO 结构）
+    try:
+        from fparser.two.utils import walk as _walk2
+        from fparser.two.Fortran2003 import Call_Stmt
+        subp_local = _find_enclosing_subprogram(loop_node)
+        if subp_local is not None and not list(_walk2(subp_local, Call_Stmt)):
+            return {}
+    except Exception:
+        pass
     members = {}
     for a in walk(loop_node, Assignment_Stmt):
         items = getattr(a, "items", [])
         lhs = items[0] if items else None
         if isinstance(lhs, (Data_Ref, Part_Ref)):
             txt_full = str(lhs).strip()
-            names = [n.string for n in walk(lhs, Name)]
-            # names: [obj, member, (subscripts...)]
-            if len(names) >= 2:
-                objn, comp = names[0], names[1]
-                base_arr = f"{objn} % {comp}"
+            import re
+            chain_txt = re.sub(r"\([^()]*\)", "", txt_full)
+            if '%' not in chain_txt:
+                continue
+            parts = [p.strip() for p in chain_txt.split('%')]
+            if len(parts) >= 2:
+                objn = parts[0]
+                comps = parts[1:]
+                chain = objn + " % " + " % ".join(comps)
                 is_array = bool(list(walk(lhs, Section_Subscript_List)))
-                key = base_arr
-                members.setdefault(key, {"component": comp.lower(), "is_array": is_array, "full": txt_full})
+                members.setdefault(chain, {"component": comps[-1].lower(), "is_array": is_array, "full": txt_full})
     if not members:
         return {}
     # 生成唯一的临时变量名，并在循环前插入声明与 copy-in
@@ -352,45 +383,46 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
     for cn in copyin_nodes:
         pc.insert(exec_insert, cn)
         exec_insert += 1
-    # 重写循环体内的赋值语句：将 base_txt 替换为 tmp 名称
-    new_loop_content = []
-    for n in list(getattr(loop_node, "content", [])):
-        if isinstance(n, Assignment_Stmt):
-            txt = str(n)
-            new_txt = txt
-            for base_txt, tmp in name_map.items():
-                # 大小写与空白不敏感替换：替换基数组名或标量名
-                new_txt = new_txt.replace(base_txt, tmp)
-                new_txt = new_txt.replace(base_txt.upper(), tmp)
-                new_txt = new_txt.replace(base_txt.lower(), tmp)
-            if new_txt != txt:
-                try:
-                    n = Assignment_Stmt(new_txt)
-                except Exception:
-                    pass
-        new_loop_content.append(n)
-    loop_node.content = new_loop_content
-    # 对嵌套结构中的赋值语句也进行替换（如 IF 块内），保持一致性
-    for a in walk(loop_node, Assignment_Stmt):
-        txt = str(a)
-        new_txt = txt
-        for base_txt, tmp in name_map.items():
-            new_txt = new_txt.replace(base_txt, tmp)
-            new_txt = new_txt.replace(base_txt.upper(), tmp)
-            new_txt = new_txt.replace(base_txt.lower(), tmp)
-        if new_txt != txt:
-            try:
-                na = Assignment_Stmt(new_txt)
-                p = getattr(a, "parent", None)
-                pc = list(getattr(p, "content", [])) if p is not None else []
-                for i, node in enumerate(pc):
-                    if node is a:
-                        pc[i] = na
+    def _rewrite_stmt(stmt):
+        from fparser.two.utils import walk as _w
+        from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Section_Subscript_List
+        import re
+        mapping = []
+        for dr in _w(stmt, (Data_Ref, Part_Ref)):
+            expr_txt = str(dr).strip()
+            base = re.sub(r"\([^()]*\)", "", expr_txt).strip()
+            tmp = name_map.get(base)
+            if not tmp:
+                continue
+            has_sub = bool(list(_w(dr, Section_Subscript_List)))
+            if has_sub and len(expr_txt) > len(base):
+                tail = expr_txt[len(base):]
+                new_expr = f"{tmp}{tail}"
+            else:
+                new_expr = f"{tmp}"
+            mapping.append((expr_txt, new_expr))
+        if not mapping:
+            return None
+        s_txt = str(stmt)
+        for old, new in mapping:
+            s_txt = s_txt.replace(old, new)
+        try:
+            return type(stmt)(s_txt)
+        except Exception:
+            return None
+    from fparser.two.utils import walk as _walk2
+    from fparser.two.Fortran2003 import Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt, If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt, Masked_Assignment_Stmt
+    for node in _walk2(loop_node, (Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt, If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt, Masked_Assignment_Stmt)):
+        nn = _rewrite_stmt(node)
+        if nn is not None:
+            p = getattr(node, "parent", None)
+            if p is not None and hasattr(p, "content"):
+                pc2 = list(getattr(p, "content", []))
+                for i, x in enumerate(pc2):
+                    if x is node:
+                        pc2[i] = nn
                         break
-                if p is not None:
-                    p.content = pc
-            except Exception:
-                pass
+                p.content = pc2
     # 在循环之后插入 copy-out
     copyout_nodes = []
     for base_txt, tmp in name_map.items():
@@ -496,26 +528,56 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         c = meta["component"]
         if c not in comps:
             comps.append(c)
-    # 先构造占位名，稍后在 AST 中保证唯一
     add_list = [f"apf_arg_{v}" for v in comps]
-    # 重写头部：在名称与实参之间插入追加参数
-    if "subroutine" in text.lower().splitlines()[0].lower():
-        text = re.sub(rf"(\bsubroutine\s+){re.escape(name)}\s*\((.*?)\)",
-                      lambda m: f"{m.group(1)}{new_name}({m.group(2)}{(',' if m.group(2).strip() else '')}{', '.join(add_list)})",
-                      text, count=1, flags=re.I|re.S)
-    else:
-        text = re.sub(rf"(\bfunction\s+){re.escape(name)}\s*\((.*?)\)",
-                      lambda m: f"{m.group(1)}{new_name}({m.group(2)}{(',' if m.group(2).strip() else '')}{', '.join(add_list)})",
-                      text, count=1, flags=re.I|re.S)
-    # 在规范区追加追加参数的声明（按标量/数组）
-    decls = []
+    # 在解析原过程文本后，基于 AST 重建头部（不使用正则）
     # 解析并返回新子程序节点，将其插入到根的内容末尾
-    r = FortranStringReader(text, ignore_comments=False, process_directives=True)
     from fparser.two.Fortran2003 import Subroutine_Subprogram, Function_Subprogram
     try:
-        new_node = Subroutine_Subprogram(r)
-    except Exception:
-        new_node = Function_Subprogram(r)
+        r = FortranStringReader(text, ignore_comments=False, process_directives=True)
+        try:
+            new_node = Subroutine_Subprogram(r)
+        except Exception:
+            new_node = Function_Subprogram(r)
+        # 替换头部名称与 Dummy_Arg_List（AST）
+        hdr = new_node.content[0]
+        from fparser.two.utils import walk as _walk
+        from fparser.two.Fortran2003 import Dummy_Arg_List, Subroutine_Stmt, Function_Stmt
+        dal = None
+        for x in _walk(hdr, Dummy_Arg_List):
+            dal = x
+            break
+        existing_args = []
+        if dal is not None:
+            existing_args = [str(it).strip() for it in getattr(dal, 'items', [])]
+        new_args_all = existing_args + add_list
+        args_inner_txt = ", ".join(new_args_all)
+        # 构造新的头部文本，保留可能的 RESULT 子句
+        hdr_txt = str(hdr)
+        # 更新名称
+        if hdr_txt.lower().startswith("subroutine"):
+            prefix = "SUBROUTINE"
+        else:
+            prefix = "FUNCTION"
+        # 提取 result 子句（若存在）
+        res_part = ""
+        idx_res = hdr_txt.lower().find("result(")
+        if idx_res != -1:
+            res_part = hdr_txt[idx_res:].strip()
+        # 重新构造头部
+        new_hdr_txt = f"{prefix} {new_name}({args_inner_txt})"
+        if res_part:
+            new_hdr_txt += f" {res_part}"
+        from fparser.common.readfortran import FortranStringReader as FSR
+        if prefix == "SUBROUTINE":
+            hdr2 = Subroutine_Stmt(FSR(new_hdr_txt + "\n"))
+        else:
+            hdr2 = Function_Stmt(FSR(new_hdr_txt + "\n"))
+        nc = list(new_node.content)
+        nc[0] = hdr2
+        new_node.content = nc
+    except Exception as e:
+        print(f"Warning: Failed to duplicate subprogram '{name}' with added args: {e}")
+        return name
     # 在新子程序的规范区插入追加参数声明，确保名称唯一
     spec = _find_spec_part(new_node)
     spc = list(getattr(spec, "content", [])) if spec is not None else []
@@ -533,56 +595,70 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         spc.append(Type_Declaration_Stmt(decl_text))
     if spec is not None:
         spec.content = spc
-    # 使用 AST 级替换：仅替换 LHS 写入链为参数名
-    _replace_lhs_with_args_in_subprogram(new_node, arg_map, add_args_map)
-    parent = _find_parent_with_content(subp)
-    pc = list(getattr(parent, "content", []))
-    ins = None
-    for i, n in enumerate(pc):
-        if n is subp:
-            ins = i + 1
-            break
+    _replace_data_refs_in_subprogram(new_node, arg_map, add_args_map)
+    container, idx = _find_container_with(subp)
+    if container is None:
+        container = _find_parent_with_content(subp)
+    pc = list(getattr(container, "content", []))
+    ins = (idx + 1) if idx is not None else None
     if ins is None:
         pc.append(new_node)
     else:
         pc.insert(ins, new_node)
-    parent.content = pc
+    container.content = pc
     return new_name
 
 
-def _replace_lhs_with_args_in_subprogram(subp_node, arg_map: dict, add_args_map: dict):
-    # 在复制过程 AST 中仅替换赋值左值为追加参数名，保留原下标
+def _replace_data_refs_in_subprogram(subp_node, arg_map: dict, add_args_map: dict):
     from fparser.two.utils import walk
-    from fparser.two.Fortran2003 import Assignment_Stmt
-    import re
-    chains = list(add_args_map.items())
-    for a in walk(subp_node, Assignment_Stmt):
-        txt = str(a)
-        new_txt = txt
-        for chain, meta in chains:
+    from fparser.two.Fortran2003 import Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List
+    def _chain_of(expr_txt: str) -> str:
+        # 去掉下标部分，保留派生链主体
+        i = expr_txt.find("(")
+        return (expr_txt[:i] if i != -1 else expr_txt).strip()
+    def _rewrite_stmt(stmt):
+        mapping = []
+        for dr in walk(stmt, (Data_Ref, Part_Ref)):
+            expr_txt = str(dr).strip()
+            base = _chain_of(expr_txt)
+            meta = add_args_map.get(base)
+            if not meta:
+                continue
             comp = meta.get("component")
             argn = arg_map.get(comp)
             if not argn:
                 continue
-            lhs_pat = re.compile(rf"^(\s*)({re.escape(chain)}\s*(\([^)]*\))?)\s*=\s*", re.I)
-            m = lhs_pat.match(new_txt)
-            if m:
-                # 保留原左值下标（若有）
-                idx = m.group(3) or ""
-                new_txt = lhs_pat.sub(f"\\g<1>{argn}{idx} = ", new_txt, count=1)
-        if new_txt != txt:
-            try:
-                na = Assignment_Stmt(new_txt)
-                p = getattr(a, "parent", None)
-                pc = list(getattr(p, "content", [])) if p is not None else []
-                for i, node in enumerate(pc):
-                    if node is a:
-                        pc[i] = na
+            has_sub = bool(list(walk(dr, Section_Subscript_List)))
+            if has_sub and len(expr_txt) > len(base):
+                tail = expr_txt[len(base):]
+                new_expr = f"{argn}{tail}"
+            else:
+                new_expr = f"{argn}"
+            mapping.append((expr_txt, new_expr))
+        if not mapping:
+            return None
+        s_txt = str(stmt)
+        for old, new in mapping:
+            s_txt = s_txt.replace(old, new)
+        try:
+            return type(stmt)(s_txt)
+        except Exception:
+            return None
+    # 覆盖更多语句类型（条件与掩码表达式中可能存在派生数据引用）
+    from fparser.two.Fortran2003 import If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt, Masked_Assignment_Stmt
+    target_types = (Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt,
+                    If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt, Masked_Assignment_Stmt)
+    for node in walk(subp_node, target_types):
+        new_node = _rewrite_stmt(node)
+        if new_node is not None:
+            p = getattr(node, "parent", None)
+            if p is not None and hasattr(p, "content"):
+                pc = list(getattr(p, "content", []))
+                for i, nn in enumerate(pc):
+                    if nn is node:
+                        pc[i] = new_node
                         break
-                if p is not None:
-                    p.content = pc
-            except Exception:
-                pass
+                p.content = pc
 
 
 def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
@@ -594,6 +670,10 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
     while hasattr(root, "parent") and root.parent is not None:
         root = root.parent
     calls = _collect_calls_in_loop(loop_node)
+    try:
+        print(f"Info: Found {len(calls)} call(s) in loop for call rewrite")
+    except Exception:
+        pass
     if not calls:
         return {}
     parent = _find_parent_with_content(loop_node)
@@ -619,9 +699,56 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
         if not subp:
             continue
         chains = _detect_derived_writes_in_subprogram(subp)
+        try:
+            print(f"Info: Callee '{cname}' has {len(chains)} derived LHS chain(s)")
+        except Exception:
+            pass
+        if not chains:
+            # 文本回退：用行级识别 callee 内的派生成员 LHS 写入
+            try:
+                text_lines = (subp.tofortran() if hasattr(subp, "tofortran") else str(subp)).splitlines()
+                dmap = detect_derived_members_in_lines(text_lines, 0, len(text_lines) - 1)
+                chains = {k: {"component": v.get("component"), "is_array": v.get("is_array", False)} for k, v in dmap.items() if v.get("write")}
+                print(f"Info: Fallback detected {len(chains)} chain(s) for '{cname}' via text scan")
+            except Exception as e:
+                print(f"Warning: Fallback detection failed for '{cname}': {e}")
         if not chains:
             continue
+        # 形参与实参映射（AST）
+        formal_args = []
+        try:
+            from fparser.two.Fortran2003 import Dummy_Arg_List
+            hdr = subp.content[0]
+            dal = None
+            for x in walk(hdr, Dummy_Arg_List):
+                dal = x
+                break
+            if dal is not None:
+                formal_args = [str(it).strip() for it in getattr(dal, 'items', [])]
+        except Exception:
+            formal_args = []
+        actual_args = []
+        try:
+            arg_list = call_node.items[1] if len(call_node.items) > 1 else None
+            if arg_list is not None and hasattr(arg_list, 'items'):
+                actual_args = [str(it).strip() for it in arg_list.items]
+        except Exception:
+            actual_args = []
+        fmap = {}
+        for i, f in enumerate(formal_args):
+            if i < len(actual_args) and f:
+                fmap[f] = actual_args[i]
+        # 将 callee 链转换为 caller 链
+        local_chains = {}
+        for chain, meta in chains.items():
+            base = chain.split('%', 1)[0].strip()
+            actual_base = fmap.get(base, base)
+            tail = chain[len(base):]
+            caller_chain = actual_base + tail
+            local_chains[caller_chain] = {"component": meta["component"], "is_array": meta["is_array"]}
+        chains = local_chains
         # 为每个链在当前过程声明临时变量并在循环前 copy-in/allocate
+        comp_to_tmp = {}
         for chain, meta in chains.items():
             comp = meta["component"]
             base_tmp = f"apf_tmp_{comp}"
@@ -665,26 +792,42 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                 if idx is not None:
                     pc.insert(idx, copyin)
             name_map[chain] = tmp
+            if comp not in comp_to_tmp:
+                comp_to_tmp[comp] = tmp
         # 复制被调用过程，替换内部派生成员引用，追加参数
         new_name = _duplicate_subprogram_with_args(root, subp, chains)
-        # 替换调用语句名称并在实参列表后追加临时变量
-        ctxt = str(call_node)
-        # 构造追加参数文本
-        add_args = [name_map.get(chain, f"apf_tmp_{meta['component']}") for chain, meta in chains.items()]
-        import re
-        if "(" in ctxt:
-            ctxt = re.sub(rf"\b{re.escape(cname)}\s*\((.*?)\)", lambda m: f"{new_name}({m.group(1)}{(',' if m.group(1).strip() else '')}{', '.join(add_args)})", ctxt, count=1)
-        else:
-            ctxt = re.sub(rf"\b{re.escape(cname)}\b", f"{new_name}({', '.join(add_args)})", ctxt, count=1)
+        # 替换调用语句名称并在实参列表后追加临时变量（AST 重建，不用正则）
+        uniq_comps = []
+        for meta in chains.values():
+            c = meta["component"]
+            if c not in uniq_comps:
+                uniq_comps.append(c)
+        add_args = [comp_to_tmp.get(c, f"apf_tmp_{c}") for c in uniq_comps]
         try:
-            new_call = Call_Stmt(FortranStringReader(ctxt, ignore_comments=False, process_directives=True))
-            # 替换父 content 中的节点
-            for i, n in enumerate(pc):
-                if n is call_node:
-                    pc[i] = new_call
-                    break
-        except Exception:
-            pass
+            existing_arg_list = call_node.items[1] if len(call_node.items) > 1 else None
+            existing_txt = str(existing_arg_list).strip() if existing_arg_list is not None else ""
+            extra_txt = ", ".join(add_args)
+            if existing_txt:
+                new_args_txt = f"{existing_txt}, {extra_txt}"
+            else:
+                new_args_txt = extra_txt
+            new_call_txt = f"CALL {new_name}({new_args_txt})"
+            new_call = Call_Stmt(FortranStringReader(new_call_txt + "\n", ignore_comments=False, process_directives=True))
+            p_call = getattr(call_node, "parent", None)
+            if p_call is not None and hasattr(p_call, "content"):
+                pcc = list(getattr(p_call, "content", []))
+                for i, n in enumerate(pcc):
+                    if n is call_node:
+                        pcc[i] = new_call
+                        break
+                p_call.content = pcc
+        except Exception as e:
+            print(f"Warning: AST rebuild failed for call '{cname}': {e}. Keeping original call.")
+        else:
+            try:
+                print(f"Info: Rewrote call '{cname}' -> '{new_name}' with extra args {add_args}")
+            except Exception:
+                pass
         # 循环后写回与释放
         idx_end = None
         for i, n in enumerate(pc):

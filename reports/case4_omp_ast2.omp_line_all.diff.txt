@@ -1,0 +1,25 @@
+--- examples/case4_omp_ast2.omp_line_all.omp_line_all.f90	2025-11-17 00:20:44
++++ examples/case4_omp_ast2.omp_line_all.omp_ast_all.f90	2025-11-17 00:20:44
+@@ -4,6 +4,12 @@
+   REAL :: A(100), B(100)
+   n = 100
+   k = 2
++  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++  ALLOCATE(apf_tmp_i(SIZE(A % i)))
++  ALLOCATE(apf_tmp_i(SIZE(B % i)))
++  apf_tmp_i = A % i
++  apf_tmp_i = B % i
+   DO i = 1, 5
+     A(i) = B(i)
+     ! S1：写A(i)
+@@ -12,4 +18,8 @@
+     A(i + 1) = 2
+     ! S3：输出依赖（S3写A(i+1)与i+1的S1写冲突）
+   END DO
++  A % i = apf_tmp_i
++  B % i = apf_tmp_i
++  DEALLOCATE(apf_tmp_i)
++  DEALLOCATE(apf_tmp_i)
+ END SUBROUTINE case8
+\ No newline at end of file

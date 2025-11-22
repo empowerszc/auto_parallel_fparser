@@ -1,0 +1,31 @@
+PROGRAM nested
+  IMPLICIT NONE
+  INTEGER :: i, j, n, m
+  REAL :: a(100, 100), b(100, 100), c(100, 100), s
+  n = 100
+  m = 100
+  s = 0.0
+  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+  ALLOCATE(apf_tmp_i(SIZE(c % i)))
+  apf_tmp_i = c % i
+  !$omp parallel do private(i, j) reduction(+:s) schedule(static) collapse(2)
+  !$omp parallel do private(i, j) schedule(static) collapse(2)
+    DO i = 1, n
+    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+    ALLOCATE(apf_tmp_i(SIZE(c % i)))
+    apf_tmp_i = c % i
+    !$omp parallel do private(j) firstprivate(i) reduction(+:s) schedule(static)
+    !$omp parallel do private(j) reduction(+:s) schedule(static)
+      DO j = 1, m
+      c(i, j) = a(i, j) + b(i, j)
+      s = s + c(i, j)
+    END DO
+    c % i = apf_tmp_i
+    DEALLOCATE(apf_tmp_i)
+    !$omp end parallel do
+    !$omp end parallel do
+  END DO
+  c % i = apf_tmp_i
+  DEALLOCATE(apf_tmp_i)
+  !$omp end parallel do
+END PROGRAM nested

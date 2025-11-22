@@ -1,0 +1,31 @@
+--- examples/indep_diff_arrays.omp_line_all.omp_line_all.f90	2025-11-17 00:21:00
++++ examples/indep_diff_arrays.omp_line_all.omp_ast_all.f90	2025-11-17 00:21:00
+@@ -1,10 +1,17 @@
+-program indep_diff_arrays
+-implicit none
+-integer :: i
+-integer, dimension(10) :: A, B
+-!$omp parallel do private(i) schedule(static)
+-do i = 1, 10
+-  A(i) = B(i-1)
+-end do
+-!$omp end parallel do
+-end program indep_diff_arrays
++PROGRAM indep_diff_arrays
++  IMPLICIT NONE
++  INTEGER :: i
++  INTEGER, DIMENSION(10) :: A, B
++  !$omp parallel do private(i) schedule(static)
++  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++  ALLOCATE(apf_tmp_i(SIZE(A % i)))
++  apf_tmp_i = A % i
++  !$omp parallel do private(i) schedule(static)
++  DO i = 1, 10
++    A(i) = B(i - 1)
++  END DO
++  A % i = apf_tmp_i
++  DEALLOCATE(apf_tmp_i)
++  !$omp end parallel do
++  !$omp end parallel do
++END PROGRAM indep_diff_arrays
+\ No newline at end of file

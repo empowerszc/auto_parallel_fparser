@@ -1,0 +1,37 @@
+--- examples/case2.omp_line_batch.f90	2025-11-17 00:33:36
++++ examples/case2.omp_ast_batch.f90	2025-11-17 00:33:37
+@@ -1,11 +1,22 @@
+-subroutine case5
+-    implicit none
+-    integer :: i, j, n
+-    real :: A(100,100)
+-    n = 100
+-do i = 2, 4
+-    do j = 2, 4
+-        A(i*j) = A((i-1)*(j+1))  ! 索引：i*j 和 (i-1)(j+1)
+-    end do
+-end do
+-end subroutine case5
++SUBROUTINE case5
++  IMPLICIT NONE
++  INTEGER :: i, j, n
++  REAL :: A(100, 100)
++  n = 100
++  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++  ALLOCATE(apf_tmp_i(SIZE(A % i)))
++  apf_tmp_i = A % i
++  DO i = 2, 4
++    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++    ALLOCATE(apf_tmp_i(SIZE(A % i)))
++    apf_tmp_i = A % i
++    DO j = 2, 4
++      A(i * j) = A((i - 1) * (j + 1))
++      ! 索引：i*j 和 (i-1)(j+1)
++    END DO
++    A % i = apf_tmp_i
++    DEALLOCATE(apf_tmp_i)
++  END DO
++  A % i = apf_tmp_i
++  DEALLOCATE(apf_tmp_i)
++END SUBROUTINE case5
+\ No newline at end of file

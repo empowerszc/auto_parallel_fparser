@@ -1,0 +1,25 @@
+--- examples/equal_1d.omp_ast_all.omp_line_all.f90	2025-11-17 00:20:59
++++ examples/equal_1d.omp_ast_all.omp_ast_all.f90	2025-11-17 00:20:59
+@@ -5,11 +5,18 @@
+   INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+   ALLOCATE(apf_tmp_i(SIZE(A % i)))
+   apf_tmp_i = A % i
++  INTEGER, ALLOCATABLE :: apf_tmp_i_2(:)
++  ALLOCATE(apf_tmp_i_2(SIZE(A % i)))
++  apf_tmp_i_2 = A % i
+   !$omp parallel do private(i) schedule(static)
+-  DO i = 1, 10
++  !$omp parallel do private(i) schedule(static)
++    DO i = 1, 10
+     A(i) = A(i)
+   END DO
+-!$omp end parallel do
++  A % i = apf_tmp_i_2
++  DEALLOCATE(apf_tmp_i_2)
+   A % i = apf_tmp_i
+   DEALLOCATE(apf_tmp_i)
+-END PROGRAM equal_1d
++  !$omp end parallel do
++  !$omp end parallel do
++END PROGRAM equal_1d
+\ No newline at end of file

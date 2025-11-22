@@ -1,0 +1,31 @@
+--- examples/derived_nested_omp_line5.omp_ast_all.omp_line_all.f90	2025-11-17 00:20:49
++++ examples/derived_nested_omp_line5.omp_ast_all.omp_ast_all.f90	2025-11-17 00:20:49
+@@ -22,16 +22,25 @@
+     ALLOCATE(apf_tmp_arr_2(SIZE(o % arr)))
+     apf_tmp_v = apf_tmp_in % v
+     apf_tmp_arr_2 = o % arr
++    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++    ALLOCATE(apf_tmp_i(SIZE(apf_tmp_arr_2 % i)))
++    apf_tmp_i = apf_tmp_arr_2 % i
+     !$omp parallel do private(i) reduction(+:apf_tmp_v) schedule(static)
++    !$omp parallel do private(i) reduction(+:apf_tmp_v) schedule(static)
++      !$omp parallel do private(i) reduction(+:apf_tmp_in % v) schedule(static)
+       DO i = 1, n
+       apf_tmp_v = apf_tmp_v + REAL(i)
+       apf_tmp_arr_2(i) = REAL(i) * 2.0
+     END DO
+-!$omp end parallel do
++    apf_tmp_arr_2 % i = apf_tmp_i
++    DEALLOCATE(apf_tmp_i)
+     apf_tmp_in % v = apf_tmp_v
+     o % arr = apf_tmp_arr_2
+     DEALLOCATE(apf_tmp_arr_2)
++    !$omp end parallel do
++    !$omp end parallel do
++    !$omp end parallel do
+     o % in = apf_tmp_in
+     o % arr = apf_tmp_arr
+   END SUBROUTINE work
+-END MODULE nested_type_mod
++END MODULE nested_type_mod
+\ No newline at end of file

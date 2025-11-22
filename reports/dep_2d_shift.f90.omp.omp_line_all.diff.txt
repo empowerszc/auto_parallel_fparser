@@ -1,0 +1,42 @@
+--- examples/dep_2d_shift.f90.omp.omp_line_all.omp_line_all.f90	2025-11-17 00:20:46
++++ examples/dep_2d_shift.f90.omp.omp_line_all.omp_ast_all.f90	2025-11-17 00:20:46
+@@ -1,14 +1,24 @@
+-program dep_2d_shift
+-implicit none
+-integer :: i, j
+-integer, dimension(10,10) :: A
+-!$omp parallel
+-!$omp do private(i, j) firstprivate(a) schedule(static)
+-do i = 1, 10
+-  do j = 1, 10
+-    A(i,j) = A(i-1,j+1)
+-!$omp end do
+-!$omp end parallel
+-  end do
+-end do
+-end program dep_2d_shift
++PROGRAM dep_2d_shift
++  IMPLICIT NONE
++  INTEGER :: i, j
++  INTEGER, DIMENSION(10, 10) :: A
++  !$omp parallel
++  !$omp do private(i, j) firstprivate(a) schedule(static)
++  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++  ALLOCATE(apf_tmp_i(SIZE(A % i)))
++  apf_tmp_i = A % i
++  DO i = 1, 10
++    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++    ALLOCATE(apf_tmp_i(SIZE(A % i)))
++    apf_tmp_i = A % i
++    DO j = 1, 10
++      A(i, j) = A(i - 1, j + 1)
++      !$omp end do
++      !$omp end parallel
++    END DO
++    A % i = apf_tmp_i
++    DEALLOCATE(apf_tmp_i)
++  END DO
++  A % i = apf_tmp_i
++  DEALLOCATE(apf_tmp_i)
++END PROGRAM dep_2d_shift
+\ No newline at end of file

@@ -1,0 +1,37 @@
+--- examples/case5.omp_line_batch.f90	2025-11-17 00:33:37
++++ examples/case5.omp_ast_batch.f90	2025-11-17 00:33:37
+@@ -1,12 +1,22 @@
+-subroutine case10
+-    implicit none
+-    integer :: i, j, n
+-    real :: A(100,100)
+-    n = 100
+-do i = 1, 4
+-    do j = 1, 4
+-        A(idx(i,j)) = A(idx(i-1,j+1))  ! 索引：k = i+2j 和 k+1 = (i-1)+2(j+1)
+-    end do
+-end do
+-end subroutine case10
+-
++SUBROUTINE case10
++  IMPLICIT NONE
++  INTEGER :: i, j, n
++  REAL :: A(100, 100)
++  n = 100
++  REAL, ALLOCATABLE :: apf_tmp_idx(:)
++  ALLOCATE(apf_tmp_idx(SIZE(A % idx)))
++  apf_tmp_idx = A % idx
++  DO i = 1, 4
++    REAL, ALLOCATABLE :: apf_tmp_idx(:)
++    ALLOCATE(apf_tmp_idx(SIZE(A % idx)))
++    apf_tmp_idx = A % idx
++    DO j = 1, 4
++      A(idx(i, j)) = A(idx(i - 1, j + 1))
++      ! 索引：k = i+2j 和 k+1 = (i-1)+2(j+1)
++    END DO
++    A % idx = apf_tmp_idx
++    DEALLOCATE(apf_tmp_idx)
++  END DO
++  A % idx = apf_tmp_idx
++  DEALLOCATE(apf_tmp_idx)
++END SUBROUTINE case10

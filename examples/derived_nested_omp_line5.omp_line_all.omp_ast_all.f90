@@ -1,0 +1,42 @@
+MODULE nested_type_mod
+  IMPLICIT NONE
+  TYPE :: Inner
+    REAL :: v
+  END TYPE Inner
+  TYPE :: Outer
+    TYPE(Inner) :: in
+    REAL, ALLOCATABLE :: arr(:)
+  END TYPE Outer
+  CONTAINS
+  SUBROUTINE work(o, n)
+    REAL :: apf_tmp_arr
+    REAL :: apf_tmp_in
+    REAL :: apf_tmp_arr
+    TYPE(Outer), INTENT(INOUT) :: o
+    INTEGER, INTENT(IN) :: n
+    INTEGER :: i
+    apf_tmp_arr = o % arr
+    apf_tmp_in = o % in
+    ALLOCATE(apf_tmp_arr(n))
+    apf_tmp_arr = o % arr
+    REAL :: apf_tmp_v
+    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+    ALLOCATE(apf_tmp_i(SIZE(apf_tmp_arr % i)))
+    apf_tmp_v = apf_tmp_in % v
+    apf_tmp_i = apf_tmp_arr % i
+    !$omp parallel do private(i) reduction(+:apf_tmp_v) schedule(static)
+    !$omp parallel do private(i) reduction(+:apf_tmp_in % v) schedule(static)
+      DO i = 1, n
+      apf_tmp_v = apf_tmp_v + REAL(i)
+      apf_tmp_arr(i) = REAL(i) * 2.0
+    END DO
+    apf_tmp_in % v = apf_tmp_v
+    apf_tmp_arr % i = apf_tmp_i
+    DEALLOCATE(apf_tmp_i)
+    !$omp end parallel do
+    !$omp end parallel do
+    o % arr = apf_tmp_arr
+    o % in = apf_tmp_in
+    o % arr = apf_tmp_arr
+  END SUBROUTINE work
+END MODULE nested_type_mod

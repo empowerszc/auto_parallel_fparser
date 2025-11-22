@@ -1,0 +1,42 @@
+
+SUBROUTINE case7
+  IMPLICIT NONE
+  INTEGER :: i, j, k, t, n
+  REAL :: C(3, 3, 3)
+  n = 3
+  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+  ALLOCATE(apf_tmp_i(SIZE(C % i)))
+  apf_tmp_i = C % i
+  !$omp parallel
+  !$omp do private(t, k, j, i) schedule(static)
+  !$omp parallel do private(t, k, j, i) schedule(static) collapse(4)
+    DO t = 1, 3
+    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+    ALLOCATE(apf_tmp_i(SIZE(C % i)))
+    apf_tmp_i = C % i
+    DO k = 1, 3
+      INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+      ALLOCATE(apf_tmp_i(SIZE(C % i)))
+      apf_tmp_i = C % i
+      DO j = 1, 3
+        INTEGER, ALLOCATABLE :: apf_tmp_i(:)
+        ALLOCATE(apf_tmp_i(SIZE(C % i)))
+        apf_tmp_i = C % i
+        DO i = 1, 3
+          C(i, j, k, t) = C(i - 1, j, k, t) + C(i, j - 1, k, t) + C(i, j, k - 1, t)
+        END DO
+        C % i = apf_tmp_i
+        DEALLOCATE(apf_tmp_i)
+        !$omp end parallel do
+      END DO
+      C % i = apf_tmp_i
+      DEALLOCATE(apf_tmp_i)
+    END DO
+    C % i = apf_tmp_i
+    DEALLOCATE(apf_tmp_i)
+  END DO
+  !$omp end do
+  !$omp end parallel
+  C % i = apf_tmp_i
+  DEALLOCATE(apf_tmp_i)
+END SUBROUTINE case7

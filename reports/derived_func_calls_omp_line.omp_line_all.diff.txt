@@ -1,0 +1,57 @@
+--- examples/derived_func_calls_omp_line.omp_line_all.omp_line_all.f90	2025-11-17 00:20:47
++++ examples/derived_func_calls_omp_line.omp_line_all.omp_ast_all.f90	2025-11-17 00:20:47
+@@ -1,26 +1,26 @@
+-module func_type_mod
+-implicit none
+-type :: T1
+-  real :: x
+-  real, allocatable :: a(:)
+-end type T1
+-contains
+-subroutine update_scalar(v)
+-  real, intent(inout) :: v
+-  v = v + 1.0
+-end subroutine update_scalar
+-subroutine update_array(v)
+-  real, intent(inout) :: v
+-  v = v * 2.0
+-end subroutine update_array
+-subroutine run(t, n)
+-  type(T1), intent(inout) :: t
+-  integer, intent(in) :: n
+-  integer :: i
+-  allocate(t%a(n))
+-  do i = 1, n
+-    call update_scalar(t%x)
+-    call update_array(t%a(i))
+-  end do
+-end subroutine run
+-end module func_type_mod
+\ No newline at end of file
++MODULE func_type_mod
++  IMPLICIT NONE
++  TYPE :: T1
++    REAL :: x
++    REAL, ALLOCATABLE :: a(:)
++  END TYPE T1
++  CONTAINS
++  SUBROUTINE update_scalar(v)
++    REAL, INTENT(INOUT) :: v
++    v = v + 1.0
++  END SUBROUTINE update_scalar
++  SUBROUTINE update_array(v)
++    REAL, INTENT(INOUT) :: v
++    v = v * 2.0
++  END SUBROUTINE update_array
++  SUBROUTINE run(t, n)
++    TYPE(T1), INTENT(INOUT) :: t
++    INTEGER, INTENT(IN) :: n
++    INTEGER :: i
++    ALLOCATE(t % a(n))
++    DO i = 1, n
++      CALL update_scalar(t % x)
++      CALL update_array(t % a(i))
++    END DO
++  END SUBROUTINE run
++END MODULE func_type_mod
+\ No newline at end of file

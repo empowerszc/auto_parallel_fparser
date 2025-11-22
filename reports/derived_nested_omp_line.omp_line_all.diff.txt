@@ -1,0 +1,69 @@
+--- examples/derived_nested_omp_line.omp_line_all.omp_line_all.f90	2025-11-17 00:20:48
++++ examples/derived_nested_omp_line.omp_line_all.omp_ast_all.f90	2025-11-17 00:20:48
+@@ -1,29 +1,36 @@
+-module nested_type_mod
+-implicit none
+-type :: Inner
+-  real :: v
+-end type Inner
+-type :: Outer
+-  type(Inner) :: in
+-  real, allocatable :: arr(:)
+-end type Outer
+-contains
+-subroutine work(o, n)
+-  type(Outer), intent(inout) :: o
+-  integer, intent(in) :: n
+-  integer :: i
+-  allocate(o%arr(n))
+-REAL :: apf_tmp_v
+-apf_tmp_v = o % in % v
+-REAL :: apf_tmp_arr(SIZE(o % arr))
+-apf_tmp_arr = o % arr
+-!$omp parallel do private(i) reduction(+:apf_tmp_v) schedule(static)
+-  do i = 1, n
+-    apf_tmp_v = apf_tmp_v + real(i)
+-    apf_tmp_arr(i) = real(i) * 2.0
+-  end do
+-!$omp end parallel do
+-o % in % v = apf_tmp_v
+-o % arr = apf_tmp_arr
+-end subroutine work
+-end module nested_type_mod
++MODULE nested_type_mod
++  IMPLICIT NONE
++  TYPE :: Inner
++    REAL :: v
++  END TYPE Inner
++  TYPE :: Outer
++    TYPE(Inner) :: in
++    REAL, ALLOCATABLE :: arr(:)
++  END TYPE Outer
++  CONTAINS
++  SUBROUTINE work(o, n)
++    TYPE(Outer), INTENT(INOUT) :: o
++    INTEGER, INTENT(IN) :: n
++    INTEGER :: i
++    ALLOCATE(o % arr(n))
++    REAL :: apf_tmp_v
++    apf_tmp_v = o % in % v
++    REAL :: apf_tmp_arr(SIZE(o % arr))
++    apf_tmp_arr = o % arr
++    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++    ALLOCATE(apf_tmp_i(SIZE(apf_tmp_arr % i)))
++    apf_tmp_i = apf_tmp_arr % i
++    !$omp parallel do private(i) reduction(+:apf_tmp_v) schedule(static)
++    !$omp parallel do private(i) reduction(+:apf_tmp_v) schedule(static)
++      DO i = 1, n
++      apf_tmp_v = apf_tmp_v + REAL(i)
++      apf_tmp_arr(i) = REAL(i) * 2.0
++    END DO
++    apf_tmp_arr % i = apf_tmp_i
++    DEALLOCATE(apf_tmp_i)
++    !$omp end parallel do
++    !$omp end parallel do
++    o % in % v = apf_tmp_v
++    o % arr = apf_tmp_arr
++  END SUBROUTINE work
++END MODULE nested_type_mod
+\ No newline at end of file

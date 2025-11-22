@@ -1,0 +1,35 @@
+--- examples/dep_2d_shift.omp_line_all.omp_line_all.f90	2025-11-17 00:20:46
++++ examples/dep_2d_shift.omp_line_all.omp_ast_all.f90	2025-11-17 00:20:46
+@@ -1,10 +1,20 @@
+-program dep_2d_shift
+-implicit none
+-integer :: i, j
+-integer, dimension(10,10) :: A
+-do i = 1, 10
+-  do j = 1, 10
+-    A(i,j) = A(i-1,j+1)
+-  end do
+-end do
+-end program dep_2d_shift
+\ No newline at end of file
++PROGRAM dep_2d_shift
++  IMPLICIT NONE
++  INTEGER :: i, j
++  INTEGER, DIMENSION(10, 10) :: A
++  INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++  ALLOCATE(apf_tmp_i(SIZE(A % i)))
++  apf_tmp_i = A % i
++  DO i = 1, 10
++    INTEGER, ALLOCATABLE :: apf_tmp_i(:)
++    ALLOCATE(apf_tmp_i(SIZE(A % i)))
++    apf_tmp_i = A % i
++    DO j = 1, 10
++      A(i, j) = A(i - 1, j + 1)
++    END DO
++    A % i = apf_tmp_i
++    DEALLOCATE(apf_tmp_i)
++  END DO
++  A % i = apf_tmp_i
++  DEALLOCATE(apf_tmp_i)
++END PROGRAM dep_2d_shift
+\ No newline at end of file
