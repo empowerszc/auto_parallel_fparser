@@ -581,20 +581,21 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
             existing_args = [str(it).strip() for it in getattr(dal, 'items', [])]
         new_args_all = existing_args + add_list
         args_inner_txt = ", ".join(new_args_all)
-        # 构造新的头部文本，保留可能的 RESULT 子句
+        # 构造新的头部文本，保留可能的前缀与 RESULT 子句
         hdr_txt = str(hdr)
-        # 更新名称
-        if hdr_txt.lower().startswith("subroutine"):
-            prefix = "SUBROUTINE"
-        else:
-            prefix = "FUNCTION"
-        # 提取 result 子句（若存在）
+        low = hdr_txt.lower()
+        is_sub = low.startswith("subroutine") or (" subroutine " in low)
+        kw = "SUBROUTINE" if is_sub else "FUNCTION"
+        idx_kw = low.find("subroutine") if is_sub else low.find("function")
+        before_kw = hdr_txt[:idx_kw].strip()
+        # 提取 RESULT 子句（若存在）
         res_part = ""
-        idx_res = hdr_txt.lower().find("result(")
+        idx_res = low.find("result(")
         if idx_res != -1:
             res_part = hdr_txt[idx_res:].strip()
-        # 重新构造头部
-        new_hdr_txt = f"{prefix} {new_name}({args_inner_txt})"
+        # 重新构造头部：保留类型/前缀（PURE/ELEMENTAL/RECURSIVE/REAL/DOUBLE PRECISION 等）
+        prefix_text = (before_kw + " ") if before_kw else ""
+        new_hdr_txt = f"{prefix_text}{kw} {new_name}({args_inner_txt})"
         if res_part:
             new_hdr_txt += f" {res_part}"
         from fparser.common.readfortran import FortranStringReader as FSR
