@@ -599,7 +599,7 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         if res_part:
             new_hdr_txt += f" {res_part}"
         from fparser.common.readfortran import FortranStringReader as FSR
-        if prefix == "SUBROUTINE":
+        if kw == "SUBROUTINE":
             hdr2 = Subroutine_Stmt(FSR(new_hdr_txt + "\n"))
         else:
             hdr2 = Function_Stmt(FSR(new_hdr_txt + "\n"))
@@ -613,6 +613,7 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
     spec = _find_spec_part(new_node)
     spc = list(getattr(spec, "content", [])) if spec is not None else []
     from fparser.two.utils import walk
+    from fparser.two.Fortran2003 import Name
     existing_names = set([n.string.lower() for n in walk(new_node, Name)])
     arg_map = {}
     for comp in comps:
@@ -622,8 +623,9 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
         arg_map[comp] = argn
         basetype = _infer_component_type(root, comp)
         is_arr = any((meta.get("component") == comp and meta.get("is_array")) for meta in add_args_map.values())
+        from fparser.common.readfortran import FortranStringReader as FSR
         decl_text = f"{basetype}, INTENT(INOUT) :: {argn}(:)" if is_arr else f"{basetype}, INTENT(INOUT) :: {argn}"
-        spc.append(Type_Declaration_Stmt(decl_text))
+        spc.append(Type_Declaration_Stmt(FSR(decl_text + "\n")))
     if spec is not None:
         spec.content = spc
     _replace_data_refs_in_subprogram(new_node, arg_map, add_args_map)
@@ -676,9 +678,9 @@ def _replace_data_refs_in_subprogram(subp_node, arg_map: dict, add_args_map: dic
         except Exception:
             return None
     # 覆盖更多语句类型（条件与掩码表达式中可能存在派生数据引用）
-    from fparser.two.Fortran2003 import If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt, Masked_Assignment_Stmt
+    from fparser.two.Fortran2003 import If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt
     target_types = (Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt,
-                    If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt, Masked_Assignment_Stmt)
+                    If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt)
     for node in walk(subp_node, target_types):
         new_node = _rewrite_stmt(node)
         if new_node is not None:
@@ -724,6 +726,7 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                 break
     name_map = {}
     from fparser.two.utils import walk
+    from fparser.two.Fortran2003 import Name
     existing_names_parent = set([n.string.lower() for n in walk(parent, Name)])
     for call_node, cname in calls:
         subp = _find_subprogram(root, cname)
@@ -788,9 +791,10 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
             # 推断成员基本类型
             basetype = _infer_component_type(root, comp)
             if meta["is_array"]:
-                decl = Type_Declaration_Stmt(f"{basetype}, ALLOCATABLE :: {tmp}(:)")
-                alloc = Allocate_Stmt(f"ALLOCATE({tmp}(SIZE({chain})))")
-                copyin = Assignment_Stmt(f"{tmp} = {chain}")
+                from fparser.common.readfortran import FortranStringReader as FSR
+                decl = Type_Declaration_Stmt(FSR(f"{basetype}, ALLOCATABLE :: {tmp}(:)\n"))
+                alloc = Allocate_Stmt(FSR(f"ALLOCATE({tmp}(SIZE({chain})))\n"))
+                copyin = Assignment_Stmt(FSR(f"{tmp} = {chain}\n"))
                 if spc is not None:
                     spc.insert(decl_insert, decl)
                     decl_insert += 1
@@ -807,8 +811,9 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                     pc.insert(idx, alloc)
                     pc.insert(idx + 1, copyin)
             else:
-                decl = Type_Declaration_Stmt(f"{basetype} :: {tmp}")
-                copyin = Assignment_Stmt(f"{tmp} = {chain}")
+                from fparser.common.readfortran import FortranStringReader as FSR
+                decl = Type_Declaration_Stmt(FSR(f"{basetype} :: {tmp}\n"))
+                copyin = Assignment_Stmt(FSR(f"{tmp} = {chain}\n"))
                 if spc is not None:
                     spc.insert(decl_insert, decl)
                     decl_insert += 1
@@ -836,22 +841,23 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
         add_args = [comp_to_tmp.get(c, f"apf_tmp_{c}") for c in uniq_comps]
         try:
             existing_arg_list = call_node.items[1] if len(call_node.items) > 1 else None
-            existing_txt = str(existing_arg_list).strip() if existing_arg_list is not None else ""
-            extra_txt = ", ".join(add_args)
-            if existing_txt:
-                new_args_txt = f"{existing_txt}, {extra_txt}"
-            else:
-                new_args_txt = extra_txt
-            new_call_txt = f"CALL {new_name}({new_args_txt})"
+            existing_items = []
+            if existing_arg_list is not None and hasattr(existing_arg_list, 'items'):
+                existing_items = [str(it).strip() for it in existing_arg_list.items]
+            args_all = existing_items + add_args
+            new_call_txt = f"CALL {new_name}({', '.join(args_all)})"
             new_call = Call_Stmt(FortranStringReader(new_call_txt + "\n", ignore_comments=False, process_directives=True))
-            p_call = getattr(call_node, "parent", None)
-            if p_call is not None and hasattr(p_call, "content"):
-                pcc = list(getattr(p_call, "content", []))
-                for i, n in enumerate(pcc):
-                    if n is call_node:
-                        pcc[i] = new_call
-                        break
-                p_call.content = pcc
+            if new_call is not None:
+                p_call = getattr(call_node, "parent", None)
+                if p_call is not None and hasattr(p_call, "content"):
+                    pcc = list(getattr(p_call, "content", []))
+                    for i, n in enumerate(pcc):
+                        if n is call_node:
+                            pcc[i] = new_call
+                            break
+                    p_call.content = pcc
+            else:
+                print(f"Warning: Parsed new call returned None for '{new_call_txt.strip()}', keeping original call.")
         except Exception as e:
             print(f"Warning: AST rebuild failed for call '{cname}': {e}. Keeping original call.")
         else:
@@ -866,12 +872,13 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                 idx_end = i + 1
                 break
         if idx_end is not None:
+            from fparser.common.readfortran import FortranStringReader as FSR
             for chain, meta in chains.items():
                 tmp = name_map.get(chain, f"apf_tmp_{meta['component']}")
-                pc.insert(idx_end, Assignment_Stmt(f"{chain} = {tmp}"))
+                pc.insert(idx_end, Assignment_Stmt(FSR(f"{chain} = {tmp}\n")))
                 idx_end += 1
                 if meta["is_array"]:
-                    pc.insert(idx_end, Deallocate_Stmt(f"DEALLOCATE({tmp})"))
+                    pc.insert(idx_end, Deallocate_Stmt(FSR(f"DEALLOCATE({tmp})\n")))
                     idx_end += 1
     parent.content = pc
     return name_map
