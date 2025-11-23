@@ -300,8 +300,21 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
         lhs = items[0] if items else None
         if isinstance(lhs, (Data_Ref, Part_Ref)):
             txt_full = str(lhs).strip()
-            import re
-            chain_txt = re.sub(r"\([^()]*\)", "", txt_full)
+            def _strip_parens(s: str) -> str:
+                out = []
+                d = 0
+                for ch in s:
+                    if ch == "(":
+                        d += 1
+                        continue
+                    if ch == ")":
+                        if d > 0:
+                            d -= 1
+                        continue
+                    if d == 0:
+                        out.append(ch)
+                return "".join(out)
+            chain_txt = _strip_parens(txt_full)
             if '%' not in chain_txt:
                 continue
             parts = [p.strip() for p in chain_txt.split('%')]
@@ -386,11 +399,12 @@ def rewrite_derived_members_to_temps(loop_node: Block_Nonlabel_Do_Construct) -> 
     def _rewrite_stmt(stmt):
         from fparser.two.utils import walk as _w
         from fparser.two.Fortran2003 import Data_Ref, Part_Ref, Section_Subscript_List
-        import re
         mapping = []
         for dr in _w(stmt, (Data_Ref, Part_Ref)):
             expr_txt = str(dr).strip()
-            base = re.sub(r"\([^()]*\)", "", expr_txt).strip()
+            # 去除括号内容，保留派生链主体
+            i = expr_txt.find("(")
+            base = (expr_txt[:i] if i != -1 else expr_txt).strip()
             tmp = name_map.get(base)
             if not tmp:
                 continue
@@ -490,15 +504,27 @@ def _detect_derived_writes_in_subprogram(subp):
     # 仅收集赋值语句左值的派生成员链（含数组形态），避免误识别下标名
     from fparser.two.utils import walk
     from fparser.two.Fortran2003 import Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List
-    import re
     chains = {}
     for a in walk(subp, Assignment_Stmt):
         items = getattr(a, "items", [])
         lhs = items[0] if items else None
         if isinstance(lhs, (Data_Ref, Part_Ref)):
             txt = str(lhs).strip()
-            # 去除数组下标，保留派生成员链
-            chain_txt = re.sub(r"\([^()]*\)", "", txt)
+            def _strip_parens(s: str) -> str:
+                out = []
+                d = 0
+                for ch in s:
+                    if ch == "(":
+                        d += 1
+                        continue
+                    if ch == ")":
+                        if d > 0:
+                            d -= 1
+                        continue
+                    if d == 0:
+                        out.append(ch)
+                return "".join(out)
+            chain_txt = _strip_parens(txt)
             if '%' not in chain_txt:
                 continue
             parts = [p.strip() for p in chain_txt.split('%')]
@@ -513,14 +539,18 @@ def _detect_derived_writes_in_subprogram(subp):
 
 def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
     # 复制子程序，追加形式参数，并将派生成员链替换为传入参数名
-    import re
     text = subp.tofortran()
-    # 取得名称并构造新名称
     header = subp.content[0]
     try:
         name = header.items[1].string
     except Exception:
-        name = re.findall(r"\b(subroutine|function)\s+([A-Za-z_]\w+)", text, re.I)[0][1]
+        from fparser.two.utils import walk as _walk
+        from fparser.two.Fortran2003 import Name
+        nm = None
+        for x in _walk(header, Name):
+            nm = x.string
+            break
+        name = nm or str(header).split()[1]
     new_name = name + "_apf"
     # 形式参数列表：追加参数名（按组件去重，确保唯一）
     comps = []
