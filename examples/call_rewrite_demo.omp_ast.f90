@@ -7,6 +7,7 @@ MODULE m_call_rewrite_demo
   TYPE :: TObj
     TYPE(TInner) :: in
   END TYPE TObj
+  TYPE(TObj) :: x_global
   CONTAINS
   SUBROUTINE callee(obj, i, a)
     IMPLICIT NONE
@@ -19,6 +20,16 @@ MODULE m_call_rewrite_demo
     obj % in % s = obj % in % s + a
   END SUBROUTINE callee
 
+    SUBROUTINE callee0
+    IMPLICIT NONE
+    INTEGER :: i
+    IF (ALLOCATED(x_global % in % arr)) THEN
+      i = 1
+      x_global % in % arr(i) = x_global % in % arr(i) + 1.0
+    END IF
+    x_global % in % s = x_global % in % s + 1.0
+  END SUBROUTINE callee0
+
     SUBROUTINE driver(n)
     IMPLICIT NONE
     INTEGER, INTENT(IN) :: n
@@ -26,9 +37,12 @@ MODULE m_call_rewrite_demo
     INTEGER :: i
     ALLOCATE(x % in % arr(n))
     x % in % s = 0.0
+    x_global % in % s = 0.0
+    ALLOCATE(x_global % in % arr(n))
     !$omp parallel do private(i) schedule(static)
     DO i = 1, n
       CALL callee(x, i, 0.1)
+      CALL callee0
     END DO
     !$omp end parallel do
   END SUBROUTINE driver

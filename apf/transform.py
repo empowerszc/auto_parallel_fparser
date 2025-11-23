@@ -841,23 +841,34 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
         add_args = [comp_to_tmp.get(c, f"apf_tmp_{c}") for c in uniq_comps]
         try:
             existing_arg_list = call_node.items[1] if len(call_node.items) > 1 else None
-            existing_items = []
+            # 直接在现有节点上就地修改：更新过程名与参数表
+            # 更新过程名
+            if hasattr(call_node.items[0], 'string'):
+                call_node.items[0].string = new_name
+            # 追加参数：依赖已有参数列表存在
             if existing_arg_list is not None and hasattr(existing_arg_list, 'items'):
-                existing_items = [str(it).strip() for it in existing_arg_list.items]
-            args_all = existing_items + add_args
-            new_call_txt = f"CALL {new_name}({', '.join(args_all)})"
-            new_call = Call_Stmt(FortranStringReader(new_call_txt + "\n", ignore_comments=False, process_directives=True))
-            if new_call is not None:
-                p_call = getattr(call_node, "parent", None)
-                if p_call is not None and hasattr(p_call, "content"):
-                    pcc = list(getattr(p_call, "content", []))
-                    for i, n in enumerate(pcc):
-                        if n is call_node:
-                            pcc[i] = new_call
-                            break
-                    p_call.content = pcc
+                from fparser.two.Fortran2003 import Name as _FName
+                current = list(existing_arg_list.items)
+                current.extend([_FName(a) for a in add_args])
+                existing_arg_list.items = tuple(current)
             else:
-                print(f"Warning: Parsed new call returned None for '{new_call_txt.strip()}', keeping original call.")
+                # 无参数列表：构造 Actual_Arg_Spec_List 节点并附加到调用
+                from fparser.two.Fortran2003 import Actual_Arg_Spec_List, Name as _FName
+                alist = object.__new__(Actual_Arg_Spec_List)
+                alist.items = tuple([_FName(a) for a in add_args])
+                # 设置分隔符，满足 SequenceBase.tostr 的序列化需求
+                setattr(alist, 'separator', ', ')
+                call_node.items = (call_node.items[0], alist)
+                # 若原调用无括号，确保序列化包含括号：Call_Stmt.tostr 会根据 items 构造 CALL name(args)
+            new_call = call_node
+            p_call = getattr(call_node, "parent", None)
+            if p_call is not None and hasattr(p_call, "content"):
+                pcc = list(getattr(p_call, "content", []))
+                for i, n in enumerate(pcc):
+                    if n is call_node:
+                        pcc[i] = new_call
+                        break
+                p_call.content = pcc
         except Exception as e:
             print(f"Warning: AST rebuild failed for call '{cname}': {e}. Keeping original call.")
         else:
