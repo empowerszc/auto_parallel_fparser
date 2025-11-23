@@ -538,7 +538,10 @@ def _detect_derived_writes_in_subprogram(subp):
 
 
 def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
-    # 复制子程序，追加形式参数，并将派生成员链替换为传入参数名
+    # 复制被调子程序：
+    # - 在头部追加 INOUT 形参（与派生成员一一对应），保留前缀与 RESULT 子句
+    # - 在规范区声明新增形参类型（数组/标量），与头部保持同名
+    # - 在过程体中将派生成员引用替换为对应形参名，实现按引用传递的写回
     text = subp.tofortran()
     header = subp.content[0]
     try:
@@ -568,7 +571,7 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
             new_node = Subroutine_Subprogram(r)
         except Exception:
             new_node = Function_Subprogram(r)
-        # 替换头部名称与 Dummy_Arg_List（AST）
+        # 替换头部名称与 Dummy_Arg_List（AST），避免正则/字符串操作
         hdr = new_node.content[0]
         from fparser.two.utils import walk as _walk
         from fparser.two.Fortran2003 import Dummy_Arg_List, Subroutine_Stmt, Function_Stmt
@@ -581,7 +584,7 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
             existing_args = [str(it).strip() for it in getattr(dal, 'items', [])]
         new_args_all = existing_args + add_list
         args_inner_txt = ", ".join(new_args_all)
-        # 构造新的头部文本，保留可能的前缀与 RESULT 子句
+        # 构造新的头部文本，保留可能的前缀与 RESULT 子句（例如 PURE/ELEMENTAL/RECURSIVE/类型说明/RESULT）
         hdr_txt = str(hdr)
         low = hdr_txt.lower()
         is_sub = low.startswith("subroutine") or (" subroutine " in low)
@@ -609,7 +612,7 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
     except Exception as e:
         print(f"Warning: Failed to duplicate subprogram '{name}' with added args: {e}")
         return name
-    # 在新子程序的规范区插入追加参数声明，确保名称唯一
+    # 在新子程序的规范区插入追加参数声明，与头部新增形参保持同名与类型
     spec = _find_spec_part(new_node)
     spc = list(getattr(spec, "content", [])) if spec is not None else []
     from fparser.two.utils import walk
@@ -617,9 +620,8 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
     existing_names = set([n.string.lower() for n in walk(new_node, Name)])
     arg_map = {}
     for comp in comps:
-        base = f"apf_arg_{comp}"
-        argn = _unique_name(base, existing_names)
-        existing_names.add(argn.lower())
+        # 与头部新增形参同名，避免出现 apf_arg_* 与 apf_arg_*_2 不一致
+        argn = f"apf_arg_{comp}"
         arg_map[comp] = argn
         basetype = _infer_component_type(root, comp)
         is_arr = any((meta.get("component") == comp and meta.get("is_array")) for meta in add_args_map.values())
@@ -643,6 +645,9 @@ def _duplicate_subprogram_with_args(root, subp, add_args_map: dict):
 
 
 def _replace_data_refs_in_subprogram(subp_node, arg_map: dict, add_args_map: dict):
+    # 在被复制的 _apf 子程序中，将派生成员链（含数组下标）替换为新增形参名：
+    # - 仅替换匹配 add_args_map 的链主体（不破坏下标/切片）
+    # - 覆盖赋值、条件、Where、分配/释放、指针赋值等语句中的出现
     from fparser.two.utils import walk
     from fparser.two.Fortran2003 import Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List
     def _chain_of(expr_txt: str) -> str:
@@ -677,7 +682,7 @@ def _replace_data_refs_in_subprogram(subp_node, arg_map: dict, add_args_map: dic
             return type(stmt)(s_txt)
         except Exception:
             return None
-    # 覆盖更多语句类型（条件与掩码表达式中可能存在派生数据引用）
+    # 覆盖更多语句类型（条件与掩码表达式中也可能存在派生数据引用）
     from fparser.two.Fortran2003 import If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt
     target_types = (Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt,
                     If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt)
@@ -695,10 +700,12 @@ def _replace_data_refs_in_subprogram(subp_node, arg_map: dict, add_args_map: dic
 
 
 def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
-    # 在循环体中查找过程调用，若被调用过程内部包含派生成员引用，则：
-    # 1) 在当前子程序规格区声明临时变量（数组 allocatable）并在循环前 copy-in/allocate
-    # 2) 复制被调用过程为 _apf 版本，追加相应的 INOUT 参数并替换内部派生成员引用
-    # 3) 修改调用语句为调用 _apf 版本并传入临时变量；循环后对临时变量进行 copy-out/deallocate
+    # 循环内调用改写（AST 全流程）：
+    # 1) 收集循环体中的调用语句；识别被调过程内派生链左值写入（数组/标量）
+    # 2) 在调用者子程序的规范区声明临时变量（数组 allocatable/标量），循环前进行 copy-in/allocate
+    # 3) 复制被调过程为 `_apf` 版本，追加对应 INOUT 形参，并在过程体中替换派生引用为形参
+    # 4) 调用点就地改名与参数扩展（包含无参调用构造实参列表）
+    # 5) 循环后将临时变量进行 copy-out/deallocate，保证数据回写
     root = loop_node
     while hasattr(root, "parent") and root.parent is not None:
         root = root.parent
@@ -832,6 +839,18 @@ def rewrite_calls_with_temps(loop_node: Block_Nonlabel_Do_Construct):
                 comp_to_tmp[comp] = tmp
         # 复制被调用过程，替换内部派生成员引用，追加参数
         new_name = _duplicate_subprogram_with_args(root, subp, chains)
+        try:
+            # 双保险：在新副本上再次执行派生成员到形参的替换，确保语句体生效
+            arg_map_local = {}
+            for meta in chains.values():
+                c = meta.get("component")
+                if c:
+                    arg_map_local[c] = f"apf_arg_{c}"
+            subp_apf = _find_subprogram(root, new_name)
+            if subp_apf is not None:
+                _replace_data_refs_in_subprogram(subp_apf, arg_map_local, chains)
+        except Exception:
+            pass
         # 替换调用语句名称并在实参列表后追加临时变量（AST 重建，不用正则）
         uniq_comps = []
         for meta in chains.values():

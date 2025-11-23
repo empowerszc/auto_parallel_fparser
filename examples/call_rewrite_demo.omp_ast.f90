@@ -1,15 +1,19 @@
 MODULE m_call_rewrite_demo
+  ! 示例模块：演示循环内调用改写（有参/无参调用）
   IMPLICIT NONE
   TYPE :: TInner
+    ! 派生类型，包含标量成员与可分配数组成员
     REAL :: s
     REAL, ALLOCATABLE :: arr(:)
   END TYPE TInner
   TYPE :: TObj
+    ! 外层对象，嵌套 TInner
     TYPE(TInner) :: in
   END TYPE TObj
   TYPE(TObj) :: x_global
   CONTAINS
   SUBROUTINE callee(obj, i, a)
+    ! 有参被调过程：内部修改 obj%in%arr(i) 与 obj%in%s
     IMPLICIT NONE
     TYPE(TObj), INTENT(INOUT) :: obj
     INTEGER, INTENT(IN) :: i
@@ -21,6 +25,7 @@ MODULE m_call_rewrite_demo
   END SUBROUTINE callee
 
     SUBROUTINE callee0
+    ! 无参被调过程：修改模块全局对象 x_global 的派生成员
     IMPLICIT NONE
     INTEGER :: i
     IF (ALLOCATED(x_global % in % arr)) THEN
@@ -31,6 +36,7 @@ MODULE m_call_rewrite_demo
   END SUBROUTINE callee0
 
     SUBROUTINE driver(n)
+    ! 驱动子程序：循环内调用 callee 与 callee0
     IMPLICIT NONE
     INTEGER, INTENT(IN) :: n
     TYPE(TObj) :: x
