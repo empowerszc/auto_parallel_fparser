@@ -648,40 +648,80 @@ def _replace_data_refs_in_subprogram(subp_node, arg_map: dict, add_args_map: dic
     # 在被复制的 _apf 子程序中，将派生成员链（含数组下标）替换为新增形参名：
     # - 仅替换匹配 add_args_map 的链主体（不破坏下标/切片）
     # - 覆盖赋值、条件、Where、分配/释放、指针赋值等语句中的出现
+    # - 以 AST 就地修改为主，避免整句字符串替换与重新解析
     from fparser.two.utils import walk
-    from fparser.two.Fortran2003 import Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List
+    from fparser.two.Fortran2003 import Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt, Data_Ref, Part_Ref, Section_Subscript_List, Name
     def _chain_of(expr_txt: str) -> str:
-        # 去掉下标部分，保留派生链主体
         i = expr_txt.find("(")
         return (expr_txt[:i] if i != -1 else expr_txt).strip()
+    def _replace_node_in_parent(parent, old_node, new_node):
+        # 通用父子替换：优先 items，其次 content
+        if parent is None:
+            return False
+        if hasattr(parent, "items") and parent.items is not None:
+            seq = list(parent.items)
+            for i, it in enumerate(seq):
+                if it is old_node:
+                    seq[i] = new_node
+                    parent.items = tuple(seq)
+                    return True
+        if hasattr(parent, "content") and parent.content is not None:
+            seq = list(parent.content)
+            for i, it in enumerate(seq):
+                if it is old_node:
+                    seq[i] = new_node
+                    parent.content = seq
+                    return True
+        return False
     def _rewrite_stmt(stmt):
-        mapping = []
+        changed = False
         for dr in walk(stmt, (Data_Ref, Part_Ref)):
             expr_txt = str(dr).strip()
+            # 计算链主体与组件名
             base = _chain_of(expr_txt)
-            meta = add_args_map.get(base)
-            if not meta:
-                continue
-            comp = meta.get("component")
+            def _last_component(txt: str) -> str:
+                t = txt.replace('%', ' ').split()
+                return (t[-1].strip().lower() if t else '')
+            comp = _last_component(base)
             argn = arg_map.get(comp)
             if not argn:
+                # 与 add_args_map 的完整链匹配再尝试一次
+                meta = add_args_map.get(base)
+                if meta:
+                    comp = meta.get("component")
+                    argn = arg_map.get(comp)
+            if not argn:
                 continue
-            has_sub = bool(list(walk(dr, Section_Subscript_List)))
-            if has_sub and len(expr_txt) > len(base):
-                tail = expr_txt[len(base):]
-                new_expr = f"{argn}{tail}"
-            else:
-                new_expr = f"{argn}"
-            mapping.append((expr_txt, new_expr))
-        if not mapping:
-            return None
-        s_txt = str(stmt)
-        for old, new in mapping:
-            s_txt = s_txt.replace(old, new)
-        try:
-            return type(stmt)(s_txt)
-        except Exception:
-            return None
+            new_base = Name(argn)
+            subs_nodes = list(walk(dr, Section_Subscript_List))
+            if isinstance(dr, Part_Ref):
+                # 替换 Part_Ref 的基础数据引用，保留下标
+                try:
+                    subs = dr.items[1]
+                    dr.items = (new_base, subs)
+                    changed = True
+                    continue
+                except Exception:
+                    pass
+            # 存在下标但当前节点不是 Part_Ref：构造新的 Part_Ref 并替换到父节点
+            if subs_nodes and not isinstance(dr, Part_Ref):
+                try:
+                    subs = subs_nodes[0]
+                    from fparser.two.Fortran2003 import Part_Ref as _PR
+                    new_pr = object.__new__(_PR)
+                    new_pr.items = (new_base, subs)
+                    # 替换到父节点
+                    p = getattr(dr, "parent", None)
+                    if _replace_node_in_parent(p, dr, new_pr):
+                        changed = True
+                        continue
+                except Exception:
+                    pass
+            # Data_Ref 情况：无下标，替换为新基础名
+            p = getattr(dr, "parent", None)
+            if _replace_node_in_parent(p, dr, new_base):
+                changed = True
+        return stmt if changed else None
     # 覆盖更多语句类型（条件与掩码表达式中也可能存在派生数据引用）
     from fparser.two.Fortran2003 import If_Stmt, If_Then_Stmt, Else_If_Stmt, Where_Stmt
     target_types = (Assignment_Stmt, Call_Stmt, Allocate_Stmt, Deallocate_Stmt, Pointer_Assignment_Stmt,
